@@ -46,7 +46,7 @@ from .. import auth_state
 from .. import updater
 from .worker     import AnalysisWorker, NetworkHistorySession, load_session_names, load_usage_percent
 from .graph_view import FunctionGraphView
-from .update_network import QtNetworkSession
+from .update_network import create_update_session
 from .styles     import (
     COLORS,
     FONT_SANS,
@@ -665,9 +665,11 @@ class _UpdateCheckWorker(QtCore.QObject):
         self._cancelled.set()
 
     def run(self) -> None:
+        session = None
         try:
+            session = create_update_session(self._cancelled)
             release_client = updater.GitHubReleaseClient(
-                session=QtNetworkSession(self._cancelled)
+                session=session
             )
             self.sig_done.emit(
                 updater.check_for_update(
@@ -675,9 +677,15 @@ class _UpdateCheckWorker(QtCore.QObject):
                     client=release_client,
                 )
             )
-        except Exception:
+        except updater.UpdateCancelled:
+            pass
+        except Exception as exc:
+            print(f"[Decompile.re] Update check failed: {exc}")
             self.sig_done.emit(None)
         finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
             self.sig_finished.emit()
 
 
@@ -694,9 +702,11 @@ class _UpdateInstallWorker(QtCore.QObject):
         self._cancelled.set()
 
     def run(self) -> None:
+        session = None
         try:
+            session = create_update_session(self._cancelled)
             release_client = updater.GitHubReleaseClient(
-                session=QtNetworkSession(self._cancelled)
+                session=session
             )
             self.sig_done.emit(
                 updater.install_latest(
@@ -709,6 +719,9 @@ class _UpdateInstallWorker(QtCore.QObject):
         except Exception as exc:
             self.sig_error.emit(exc)
         finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
             self.sig_finished.emit()
 
 

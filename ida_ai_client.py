@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import uuid
 
 import idaapi
 import ida_kernwin
@@ -24,6 +25,17 @@ PLUGIN_WANTED_NAME = PLUGIN_NAME
 _dialog = None    # keep reference so Qt doesn't GC it
 _ACTION_DISASSEMBLY = "decompile_re:analyse_disassembly"
 _ACTION_PSEUDOCODE = "decompile_re:analyse_pseudocode"
+_UPDATE_RUN_ID_ENV = "DECOMPILE_RE_UPDATE_RUN_ID"
+_UPDATE_RUN_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+
+
+def _update_process_identity() -> str:
+    """Return one stable identity across repeated plugin loads in this process."""
+    run_id = os.environ.get(_UPDATE_RUN_ID_ENV, "")
+    if not _UPDATE_RUN_ID_RE.fullmatch(run_id):
+        run_id = uuid.uuid4().hex
+        os.environ[_UPDATE_RUN_ID_ENV] = run_id
+    return f"{os.getpid()}:{run_id}"
 
 
 def _recover_interrupted_update() -> None:
@@ -48,13 +60,15 @@ def _recover_interrupted_update() -> None:
         staging = root / f".decompile-re-staging-{operation_id}"
         backup = root / ".decompile-re-backups" / operation_id
 
-        if journal.get("state") == "activated":
-            if (
-                target_entry.is_file()
-                and (target_module / "__init__.py").is_file()
-                and journal.get("health_check_started") is not True
-            ):
+        if (
+            journal.get("state") == "activated"
+            and target_entry.is_file()
+            and (target_module / "__init__.py").is_file()
+        ):
+            process_identity = _update_process_identity()
+            if journal.get("health_check_started") is not True:
                 journal["health_check_started"] = True
+                journal["health_check_process"] = process_identity
                 temporary = journal_path.with_name(
                     f".{journal_path.name}.{operation_id}.tmp"
                 )
@@ -64,6 +78,8 @@ def _recover_interrupted_update() -> None:
                 )
                 os.replace(temporary, journal_path)
                 shutil.rmtree(staging, ignore_errors=True)
+                return
+            if journal.get("health_check_process") == process_identity:
                 return
 
         backup_module = backup / "ida_ai_client"
@@ -97,6 +113,8 @@ def _mark_update_healthy() -> None:
             and journal.get("schema_version") == 1
             and journal.get("state") == "activated"
             and journal.get("health_check_started") is True
+            and journal.get("health_check_process")
+            == _update_process_identity()
         ):
             journal_path.unlink()
     except Exception as exc:
