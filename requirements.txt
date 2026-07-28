@@ -1,0 +1,4 @@
+requests>=2.32.4,<3
+keyring>=25,<26
+cryptography>=44,<50
+Pygments>=2.17,<3

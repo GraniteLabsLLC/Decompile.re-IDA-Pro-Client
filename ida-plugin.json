@@ -1,0 +1,47 @@
+{
+  "$schema": "https://hcli.docs.hex-rays.com/schemas/ida-plugin.json",
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "decompile-re",
+    "version": "1.0.0",
+    "entryPoint": "ida_ai_client.py",
+    "idaVersions": [
+      "8.3",
+      "8.4",
+      "9.0",
+      "9.1",
+      "9.2",
+      "9.3"
+    ],
+    "description": "AI-assisted reverse engineering, decompilation, and source reconstruction for IDA Pro.",
+    "license": "PolyForm-Noncommercial-1.0.0",
+    "categories": [
+      "decompilation",
+      "deobfuscation",
+      "ui-ux-and-visualization"
+    ],
+    "pythonDependencies": [
+      "requests>=2.32.4,<3",
+      "keyring>=25,<26",
+      "cryptography>=44,<50",
+      "Pygments>=2.17,<3"
+    ],
+    "urls": {
+      "repository": "https://github.com/GraniteLabsLLC/Decompile.re-IDA-Pro-Client",
+      "homepage": "https://decompile.re"
+    },
+    "authors": [
+      {
+        "name": "Arthur",
+        "email": "91468625+VeryElusive@users.noreply.github.com"
+      }
+    ],
+    "keywords": [
+      "ai",
+      "decompiler",
+      "reverse-engineering",
+      "call-graph",
+      "source-reconstruction"
+    ]
+  }
+}
