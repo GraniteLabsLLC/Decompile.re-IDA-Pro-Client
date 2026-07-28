@@ -22,6 +22,48 @@ Restart IDA after installation. Decompile.re appears under **Edit > Plugins**
 and is available with `Ctrl+Shift+A` or from the disassembly and pseudocode
 context menus.
 
+### Manual installation
+
+Manual installation assumes IDAPython is already configured in IDA.
+
+1. Download and extract the plugin ZIP from the
+   [latest release](https://github.com/GraniteLabsLLC/Decompile.re-IDA-Pro-Client/releases/latest).
+2. Open IDA's Python console and run:
+
+   ```python
+   from pathlib import Path
+   import idaapi
+   import sys
+
+   print("Plugin directory:", Path(idaapi.get_user_idadir()) / "plugins")
+   print("Python version:", sys.version)
+   print("Python prefix:", sys.prefix)
+   ```
+
+3. Create the displayed `plugins` directory if necessary. Copy
+   `ida_ai_client.py` and the complete `ida_ai_client` directory from the
+   extracted release into it.
+4. Use a Python interpreter with the same major and minor version shown by
+   IDA to install the release dependencies:
+
+   **Windows PowerShell**
+
+   ```powershell
+   & "C:\path\to\matching\python.exe" -m pip install --user -r "C:\path\to\extracted\requirements.txt"
+   ```
+
+   **macOS or Linux**
+
+   ```bash
+   /path/to/matching/python3 -m pip install --user -r /path/to/extracted/requirements.txt
+   ```
+
+5. Remove any older Decompile.re copies from other IDA plugin directories,
+   then restart IDA.
+
+If IDAPython or a matching Python installation is unavailable, use the setup
+wizard instead of modifying IDA's installation directory manually.
+
 The client checks this repository's stable GitHub Releases feed in the
 background. When a newer compatible release is available, an optional
 **Update** button appears beside the account control. Restart IDA after an
