@@ -6,7 +6,7 @@ database, supports follow-up questions, and can reconstruct source projects.
 
 ## Requirements
 
-- IDA Professional 8.x through 9.x with the Hex-Rays decompiler
+- IDA Professional 8.3 through 9.3 with the Hex-Rays decompiler
 - IDAPython using Python 3.10 or newer
 - A Decompile.re account
 - A browser for account sign-in
