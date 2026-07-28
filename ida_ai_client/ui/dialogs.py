@@ -907,8 +907,6 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
         self.spin_depth = QtWidgets.QSpinBox()
         self.spin_depth.setRange(-1, 10)
-        self.spin_workers = QtWidgets.QSpinBox()
-        self.spin_workers.setRange(1, 100)
 
         self.chk_renames = QtWidgets.QCheckBox("Apply renames")
         self.chk_types   = QtWidgets.QCheckBox("Apply struct member type changes")
@@ -925,7 +923,6 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self.cmb_struct_member_style.setToolTip("Preferred style for structure member names.")
 
         f2.addRow("Max call depth",   self.spin_depth)
-        f2.addRow("Parallel workers", self.spin_workers)
         f2.addRow("Rename style", self.cmb_rename_style)
         f2.addRow("Struct member style", self.cmb_struct_member_style)
         f2.addRow("", self.chk_renames)
@@ -959,7 +956,6 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
     def _populate(self):
         s = g_settings
         self.spin_depth.setValue(s.get("max_call_depth", -1))
-        self.spin_workers.setValue(s.get("max_parallel_workers", 100))
         self.chk_renames.setChecked(s.get("auto_renames", True))
         self.chk_types.setChecked(s.get("auto_types", True))
         self.chk_structs.setChecked(s.get("auto_structs", True))
@@ -1093,7 +1089,6 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         theme_changed = new_theme != g_settings.get("theme")
         g_settings.update({
             "max_call_depth":       self.spin_depth.value(),
-            "max_parallel_workers": self.spin_workers.value(),
             "auto_renames":         self.chk_renames.isChecked(),
             "auto_types":           self.chk_types.isChecked(),
             "auto_structs":         self.chk_structs.isChecked(),

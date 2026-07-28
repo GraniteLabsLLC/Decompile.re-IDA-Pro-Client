@@ -205,7 +205,6 @@ class AnalysisWorker(QThread):
                 struct_member_style  = g_settings.get("struct_member_style", "default"),
                 skip_reversing       = False,
                 max_call_depth       = g_settings.get("max_call_depth", 2),
-                max_parallel_workers = g_settings.get("max_parallel_workers", 3),
                 decompiler           = "ida",
             )
         except AuthError as e:

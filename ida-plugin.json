@@ -3,7 +3,7 @@
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
     "name": "decompile-re",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "entryPoint": "ida_ai_client.py",
     "idaVersions": [
       "8.3",

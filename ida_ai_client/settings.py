@@ -56,16 +56,6 @@ def _validated_settings(saved: object) -> dict:
         -1,
         min(10, validated.get("max_call_depth", DEFAULT_SETTINGS["max_call_depth"])),
     )
-    validated["max_parallel_workers"] = max(
-        1,
-        min(
-            100,
-            validated.get(
-                "max_parallel_workers",
-                DEFAULT_SETTINGS["max_parallel_workers"],
-            ),
-        ),
-    )
     return validated
 
 

@@ -461,7 +461,6 @@ class ServerSession:
         struct_member_style: str,
         skip_reversing: bool,
         max_call_depth: int,
-        max_parallel_workers: int,
         decompiler: str = "ida",
     ) -> str:
         """Start a new analysis session. Returns the session ID.
@@ -480,7 +479,6 @@ class ServerSession:
             "struct_member_style":  struct_member_style,
             "skip_reversing":       skip_reversing,
             "max_call_depth":       max_call_depth,
-            "max_parallel_workers": max_parallel_workers,
             "decompiler":           decompiler,
             "protocol_version":     1,
         }
@@ -628,8 +626,11 @@ class ServerSession:
                 raise ServerProtocolError(
                     "Session poll returned an invalid needs_result flag."
                 )
-            if "id" in command:
-                _require_protocol_id(command["id"], "command ID")
+            command_id = command.get("id")
+            if command.get("needs_result") is True:
+                _require_protocol_id(command_id, "command ID")
+            elif command_id not in (None, ""):
+                _require_protocol_id(command_id, "command ID")
         return data
 
     def post_result(self, command_id: str, result: dict) -> str:
