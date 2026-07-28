@@ -28,7 +28,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from .config import (
     CLIENT_USER_AGENT,
     PLUGIN_VERSION,
-    PYTHON_DEPENDENCIES,
     SETTINGS_DIR,
 )
 
@@ -797,19 +796,36 @@ def _payload_version(payload: Path) -> str:
     return version
 
 
-def _validate_dependencies(payload: Path) -> None:
-    requirements = payload / "requirements.txt"
-    if not requirements.is_file():
-        raise UpdateError("Plugin archive is missing requirements.txt")
+def _requirements(path: Path) -> set[str]:
+    if not path.is_file():
+        raise UpdateError("Python requirements are missing")
     try:
-        actual = {
+        return {
             line.strip()
-            for line in requirements.read_text("utf-8").splitlines()
+            for line in path.read_text("utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
     except (OSError, UnicodeError) as exc:
         raise UpdateError("Plugin requirements could not be read") from exc
-    if actual != set(PYTHON_DEPENDENCIES):
+
+
+def _installed_requirements_path() -> Path:
+    packaged = Path(__file__).resolve().with_name("requirements.txt")
+    if packaged.is_file():
+        return packaged
+    return Path(__file__).resolve().parents[1] / "requirements.txt"
+
+
+def _validate_dependencies(payload: Path) -> None:
+    staged = _requirements(payload / "requirements.txt")
+    installed_path = _installed_requirements_path()
+    if not installed_path.is_file():
+        raise InstallerRequiredError(
+            "The current installation does not record its Python dependencies. "
+            "Use the Decompile.re setup wizard to update it safely."
+        )
+    installed = _requirements(installed_path)
+    if staged != installed:
         raise InstallerRequiredError(
             "This release changes Python dependencies. Use the Decompile.re "
             "setup wizard to install it safely."

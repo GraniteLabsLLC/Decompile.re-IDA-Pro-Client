@@ -64,19 +64,20 @@ def sign_in_with_browser(
         while time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 raise BrowserAuthCancelled("Browser sign-in was cancelled.")
-            if server.auth_code:
-                exchange = _exchange_auth_code(server.auth_code, state, code_verifier)
-                return {
-                    "refresh_token": exchange["refresh_token"],
-                    "user_id": exchange.get("user_id", ""),
-                    "email": exchange.get("email", ""),
-                    "name": exchange.get("profile_name", "") or exchange.get("email", ""),
-                    "avatar_url": exchange.get("avatar_url", ""),
-                    "device_fingerprint": device_public_key,
-                    "server_url": ACTIVE_API_URL,
-                }
-            if server.error:
-                raise BrowserAuthError(server.error)
+            if server.callback_complete.is_set():
+                if server.auth_code:
+                    exchange = _exchange_auth_code(server.auth_code, state, code_verifier)
+                    return {
+                        "refresh_token": exchange["refresh_token"],
+                        "user_id": exchange.get("user_id", ""),
+                        "email": exchange.get("email", ""),
+                        "name": exchange.get("profile_name", "") or exchange.get("email", ""),
+                        "avatar_url": exchange.get("avatar_url", ""),
+                        "device_fingerprint": device_public_key,
+                        "server_url": ACTIVE_API_URL,
+                    }
+                if server.error:
+                    raise BrowserAuthError(server.error)
             if cancel_event is not None:
                 cancel_event.wait(0.1)
             else:
@@ -167,16 +168,21 @@ class _CallbackServer(HTTPServer):
         self.expected_origin = expected_origin
         self.auth_code: str = ""
         self.error: str = ""
+        self.callback_complete = threading.Event()
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
     server: _CallbackServer
 
     def finish(self):
-        super().finish()
-        auth_code = getattr(self, "_accepted_auth_code", "")
-        if auth_code:
-            self.server.auth_code = auth_code
+        try:
+            super().finish()
+        finally:
+            auth_code = getattr(self, "_accepted_auth_code", "")
+            if auth_code:
+                self.server.auth_code = auth_code
+            if getattr(self, "_completes_callback", False):
+                self.server.callback_complete.set()
 
     def do_GET(self):  # noqa: N802 - http.server API
         target = urllib.parse.urlsplit(self.path)
@@ -193,11 +199,6 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         if target.path != "/decompile-auth/callback" or target.query:
             self._send_html(404, "Invalid callback path.")
             return
-        origin = self.headers.get("origin", "")
-        if origin != self.server.expected_origin:
-            self.server.error = "Invalid callback origin."
-            self._send_html(403, self.server.error)
-            return
         try:
             length = int(self.headers.get("content-length", "0") or "0")
         except ValueError:
@@ -206,23 +207,31 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self._send_html(413, "Invalid callback body size.")
             return
         raw = self.rfile.read(length)
+
+        origin = self.headers.get("origin", "")
+        if origin != self.server.expected_origin:
+            self._send_error(403, "Invalid callback origin.")
+            return
+
         state, auth_code, error = self._parse_body(raw)
 
         if error:
-            self.server.error = error
-            self._send_html(400, error)
+            self._send_error(400, error)
             return
         if state != self.server.expected_state:
-            self.server.error = "Browser sign-in state mismatch."
-            self._send_html(400, self.server.error)
+            self._send_error(400, "Browser sign-in state mismatch.")
             return
         if not auth_code:
-            self.server.error = "Dashboard callback did not include a sign-in code."
-            self._send_html(400, self.server.error)
+            self._send_error(
+                400,
+                "Dashboard callback did not include a sign-in code.",
+            )
             return
         if not _is_url_token(auth_code, 32, 128):
-            self.server.error = "Dashboard callback included an invalid sign-in code."
-            self._send_html(400, self.server.error)
+            self._send_error(
+                400,
+                "Dashboard callback included an invalid sign-in code.",
+            )
             return
 
         completion_url = (
@@ -231,6 +240,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         )
         self._send_redirect(completion_url)
         self._accepted_auth_code = auth_code
+        self._completes_callback = True
 
     def log_message(self, _fmt, *_args):
         return
@@ -271,6 +281,11 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_error(self, status: int, message: str):
+        self.server.error = message
+        self._completes_callback = True
+        self._send_html(status, message)
 
     def _send_redirect(self, location: str):
         self.send_response(303)

@@ -36,7 +36,13 @@ from ..compat.qt import (
     QShortcut,
 )
 
-from ..config   import PLUGIN_NAME, REQUESTS_AVAILABLE, g_settings, is_loopback_server_url
+from ..config import (
+    PLUGIN_NAME,
+    REQUESTS_AVAILABLE,
+    SETUP_WIZARD_RELEASE_URL,
+    g_settings,
+    is_loopback_server_url,
+)
 from ..settings import save_settings
 from ..session  import reset_shared_auth_context
 from ..ida.navigation import get_current_function_ea, get_function_name
@@ -5068,9 +5074,24 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         message = str(error) or "The update could not be installed."
         if isinstance(error, updater.InstallerRequiredError):
             message += (
-                "\n\nDownload and run the Decompile.re setup wizard to "
-                "complete this update."
+                "\n\nThe Decompile.re setup wizard is required to complete "
+                "this update. Open its official download page now?"
             )
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Setup wizard required",
+                message,
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes,
+            )
+            if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+                webbrowser.open(
+                    SETUP_WIZARD_RELEASE_URL,
+                    new=1,
+                    autoraise=True,
+                )
+            return
         QtWidgets.QMessageBox.warning(self, "Update failed", message)
 
     def _update_install_finished(self) -> None:

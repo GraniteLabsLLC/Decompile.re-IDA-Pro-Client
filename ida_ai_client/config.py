@@ -7,18 +7,16 @@ import os
 from urllib.parse import urlparse
 
 PLUGIN_NAME    = "Decompile.re"
-PLUGIN_VERSION = "1.0.3"
+PLUGIN_VERSION = "1.0.5"
 PLUGIN_HOTKEY  = "Ctrl-Shift-A"
 CLIENT_USER_AGENT = f"decompile-re-ida/{PLUGIN_VERSION}"
-PYTHON_DEPENDENCIES = (
-    "requests>=2.32.4,<3",
-    "keyring>=25,<26",
-    "cryptography>=44,<50",
-    "Pygments>=2.17,<3",
-)
 
 PRODUCTION_API_URL = "https://api.decompile.re"
 PRODUCTION_DASHBOARD_URL = "https://decompile.re"
+SETUP_WIZARD_RELEASE_URL = (
+    "https://github.com/GraniteLabsLLC/"
+    "Decompile.re-Setup-Wizard/releases/latest"
+)
 LOCAL_API_URL = "http://127.0.0.1:8080"
 LOCAL_DASHBOARD_URL = "http://127.0.0.1:3000"
 
