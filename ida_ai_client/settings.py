@@ -53,7 +53,7 @@ def _validated_settings(saved: object) -> dict:
         validated["struct_member_style"] = DEFAULT_SETTINGS["struct_member_style"]
 
     validated["max_call_depth"] = max(
-        -1,
+        0,
         min(10, validated.get("max_call_depth", DEFAULT_SETTINGS["max_call_depth"])),
     )
     return validated

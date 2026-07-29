@@ -432,6 +432,18 @@ def main_qss() -> str:
         background: transparent;
         border: none;
     }}
+    QLabel#activityActionLabel {{
+        color: {c['text_dim']};
+        font-family: {FONT_SANS};
+        font-size: 12px;
+        background: transparent;
+    }}
+    QLabel#activityActionDetail {{
+        color: {c['text_mute']};
+        font-family: {FONT_MONO};
+        font-size: 10px;
+        background: transparent;
+    }}
     {scrollbar_qss("QScrollArea#workingActivityPane")}
 
     /* ── Chat input row — the left divider + top border are drawn by

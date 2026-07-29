@@ -17,6 +17,7 @@ import datetime
 import math
 import threading
 import webbrowser
+from collections import deque
 from functools import lru_cache
 from html import escape
 from typing import Optional
@@ -905,8 +906,10 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         f2 = QtWidgets.QFormLayout(grp_an)
         f2.setSpacing(10)
 
+        self.chk_limit_depth = QtWidgets.QCheckBox("Limit max call depth")
         self.spin_depth = QtWidgets.QSpinBox()
-        self.spin_depth.setRange(-1, 10)
+        self.spin_depth.setRange(1, 10)
+        self.chk_limit_depth.toggled.connect(self.spin_depth.setEnabled)
 
         self.chk_renames = QtWidgets.QCheckBox("Apply renames")
         self.chk_types   = QtWidgets.QCheckBox("Apply struct member type changes")
@@ -922,7 +925,8 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self.cmb_struct_member_style.addItem("typed m_ prefix", "typed_m_prefix")
         self.cmb_struct_member_style.setToolTip("Preferred style for structure member names.")
 
-        f2.addRow("Max call depth",   self.spin_depth)
+        f2.addRow("", self.chk_limit_depth)
+        f2.addRow("Max call depth", self.spin_depth)
         f2.addRow("Rename style", self.cmb_rename_style)
         f2.addRow("Struct member style", self.cmb_struct_member_style)
         f2.addRow("", self.chk_renames)
@@ -955,7 +959,11 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
     def _populate(self):
         s = g_settings
-        self.spin_depth.setValue(s.get("max_call_depth", -1))
+        max_call_depth = s.get("max_call_depth", 0)
+        limit_call_depth = max_call_depth > 0
+        self.spin_depth.setValue(max_call_depth if limit_call_depth else 2)
+        self.chk_limit_depth.setChecked(limit_call_depth)
+        self.spin_depth.setEnabled(limit_call_depth)
         self.chk_renames.setChecked(s.get("auto_renames", True))
         self.chk_types.setChecked(s.get("auto_types", True))
         self.chk_structs.setChecked(s.get("auto_structs", True))
@@ -1088,7 +1096,11 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         new_theme = self.cmb_theme.currentText()
         theme_changed = new_theme != g_settings.get("theme")
         g_settings.update({
-            "max_call_depth":       self.spin_depth.value(),
+            "max_call_depth": (
+                self.spin_depth.value()
+                if self.chk_limit_depth.isChecked()
+                else 0
+            ),
             "auto_renames":         self.chk_renames.isChecked(),
             "auto_types":           self.chk_types.isChecked(),
             "auto_structs":         self.chk_structs.isChecked(),
@@ -1433,17 +1445,149 @@ class _ActivityChevron(QtWidgets.QWidget):
         painter.drawPath(path)
 
 
+def _draw_pencil_glyph(
+    painter: QtGui.QPainter,
+    center: QtCore.QPointF,
+) -> None:
+    cx = float(center.x())
+    cy = float(center.y())
+    pencil = QtGui.QPainterPath()
+    pencil.moveTo(cx - 4.5, cy + 2.8)
+    pencil.lineTo(cx + 2.6, cy - 4.3)
+    pencil.quadTo(cx + 3.5, cy - 5.2, cx + 4.4, cy - 4.3)
+    pencil.lineTo(cx + 5.3, cy - 3.4)
+    pencil.quadTo(cx + 6.2, cy - 2.5, cx + 5.3, cy - 1.6)
+    pencil.lineTo(cx - 1.8, cy + 5.5)
+    pencil.lineTo(cx - 5.8, cy + 6.8)
+    pencil.closeSubpath()
+    painter.drawPath(pencil)
+    painter.drawLine(
+        QtCore.QPointF(cx - 4.5, cy + 2.8),
+        QtCore.QPointF(cx - 1.8, cy + 5.5),
+    )
+    painter.drawLine(
+        QtCore.QPointF(cx + 2.3, cy - 4.0),
+        QtCore.QPointF(cx + 5.0, cy - 1.3),
+    )
+
+
+_ACTIVITY_NOTE_TOOLS = {
+    "add_note",
+    "replace_note",
+    "move_note",
+    "remove_note",
+    "rename_section",
+    "remove_section",
+}
+
+
+def _activity_color_key(kind: str) -> str:
+    if kind in {"error", "failed"}:
+        return "failed"
+    if kind in {"warn", "warning"}:
+        return "warn"
+    if kind in {"success", "result", "done", "completed"}:
+        return "done"
+    if kind in {"skipped", "skipped_callees"}:
+        return "text_mute"
+    return "accent"
+
+
+def _paint_activity_icon(
+    painter: QtGui.QPainter,
+    kind: str,
+    top_left: Optional[QtCore.QPointF] = None,
+) -> None:
+    painter.save()
+    if top_left is not None:
+        painter.translate(top_left)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+
+    accent = QtGui.QColor(COLORS[_activity_color_key(kind)])
+    fill = QtGui.QColor(accent)
+    fill.setAlpha(24)
+    outline = QtGui.QColor(accent)
+    outline.setAlpha(72)
+    painter.setPen(QtGui.QPen(outline, 1))
+    painter.setBrush(fill)
+    painter.drawRoundedRect(QtCore.QRectF(1.5, 1.5, 21.0, 21.0), 5.0, 5.0)
+
+    pen = QtGui.QPen(accent, 1.55)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    if kind in {"get_pseudocode", "read_pseudocode"}:
+        painter.drawLine(QtCore.QPointF(9.0, 8.0), QtCore.QPointF(6.0, 12.0))
+        painter.drawLine(QtCore.QPointF(6.0, 12.0), QtCore.QPointF(9.0, 16.0))
+        painter.drawLine(QtCore.QPointF(15.0, 8.0), QtCore.QPointF(18.0, 12.0))
+        painter.drawLine(QtCore.QPointF(18.0, 12.0), QtCore.QPointF(15.0, 16.0))
+        painter.drawLine(QtCore.QPointF(13.5, 7.5), QtCore.QPointF(10.5, 16.5))
+    elif kind in {"reverse_functions", "callees", "virtual_call"}:
+        painter.drawLine(QtCore.QPointF(8.0, 12.0), QtCore.QPointF(15.0, 8.0))
+        painter.drawLine(QtCore.QPointF(8.0, 12.0), QtCore.QPointF(15.0, 16.0))
+        painter.setBrush(accent)
+        for point in ((7.0, 12.0), (16.0, 7.5), (16.0, 16.5)):
+            painter.drawEllipse(QtCore.QPointF(*point), 1.8, 1.8)
+    elif kind in {"get_memory", "struct_created", "struct_updated"}:
+        painter.drawRoundedRect(
+            QtCore.QRectF(7.0, 7.0, 10.0, 10.0),
+            1.5,
+            1.5,
+        )
+        for pos in (9.0, 12.0, 15.0):
+            painter.drawLine(QtCore.QPointF(pos, 5.0), QtCore.QPointF(pos, 7.0))
+            painter.drawLine(QtCore.QPointF(pos, 17.0), QtCore.QPointF(pos, 19.0))
+            painter.drawLine(QtCore.QPointF(5.0, pos), QtCore.QPointF(7.0, pos))
+            painter.drawLine(QtCore.QPointF(17.0, pos), QtCore.QPointF(19.0, pos))
+    elif kind in {"get_value_from_name", "investigate"}:
+        painter.drawEllipse(QtCore.QRectF(6.5, 6.5, 8.5, 8.5))
+        painter.drawLine(QtCore.QPointF(14.0, 14.0), QtCore.QPointF(18.0, 18.0))
+        painter.drawLine(QtCore.QPointF(9.0, 10.8), QtCore.QPointF(12.5, 10.8))
+    elif kind in {"function_rename", "parameter_renames"}:
+        _draw_pencil_glyph(painter, QtCore.QPointF(12.0, 12.0))
+    elif kind in {"local_renames", "global_rename"}:
+        painter.drawLine(QtCore.QPointF(7.0, 16.5), QtCore.QPointF(15.5, 8.0))
+        painter.drawLine(QtCore.QPointF(14.0, 7.0), QtCore.QPointF(17.0, 10.0))
+        painter.drawLine(QtCore.QPointF(6.5, 17.5), QtCore.QPointF(10.0, 16.5))
+    elif kind == "refining":
+        painter.drawArc(
+            QtCore.QRectF(6.5, 6.5, 11.0, 11.0),
+            25 * 16,
+            275 * 16,
+        )
+        path = QtGui.QPainterPath()
+        path.moveTo(16.5, 6.5)
+        path.lineTo(17.5, 10.0)
+        path.lineTo(14.0, 9.0)
+        painter.drawPath(path)
+    elif kind in _ACTIVITY_NOTE_TOOLS or kind == "sectioned_analysis":
+        painter.drawRoundedRect(
+            QtCore.QRectF(7.0, 5.5, 10.0, 13.0),
+            1.2,
+            1.2,
+        )
+        painter.drawLine(QtCore.QPointF(9.5, 9.0), QtCore.QPointF(14.5, 9.0))
+        painter.drawLine(QtCore.QPointF(9.5, 12.0), QtCore.QPointF(14.5, 12.0))
+        painter.drawLine(QtCore.QPointF(9.5, 15.0), QtCore.QPointF(13.0, 15.0))
+    elif kind in {"success", "result", "done", "completed"}:
+        painter.drawLine(QtCore.QPointF(7.0, 12.5), QtCore.QPointF(10.5, 16.0))
+        painter.drawLine(QtCore.QPointF(10.5, 16.0), QtCore.QPointF(17.5, 8.5))
+    elif kind in {"error", "failed"}:
+        painter.drawLine(QtCore.QPointF(8.0, 8.0), QtCore.QPointF(16.0, 16.0))
+        painter.drawLine(QtCore.QPointF(16.0, 8.0), QtCore.QPointF(8.0, 16.0))
+    elif kind in {"warn", "warning", "skipped", "skipped_callees"}:
+        painter.drawLine(QtCore.QPointF(12.0, 7.0), QtCore.QPointF(12.0, 13.0))
+        painter.drawPoint(QtCore.QPointF(12.0, 16.5))
+    else:
+        painter.drawEllipse(QtCore.QPointF(12.0, 8.0), 0.8, 0.8)
+        painter.drawLine(QtCore.QPointF(12.0, 11.0), QtCore.QPointF(12.0, 17.0))
+    painter.restore()
+
+
 class _ActivityIcon(QtWidgets.QWidget):
     """Theme-aware vector icon used by final-agent activity rows."""
-
-    _NOTE_TOOLS = {
-        "add_note",
-        "replace_note",
-        "move_note",
-        "remove_note",
-        "rename_section",
-        "remove_section",
-    }
 
     def __init__(self, kind: str, parent=None):
         super().__init__(parent)
@@ -1451,101 +1595,9 @@ class _ActivityIcon(QtWidgets.QWidget):
         self.setFixedSize(24, 24)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-    def _color_key(self) -> str:
-        if self._kind in {"error", "failed"}:
-            return "failed"
-        if self._kind in {"warn", "warning"}:
-            return "warn"
-        if self._kind in {"success", "result", "done", "completed"}:
-            return "done"
-        if self._kind in {"skipped", "skipped_callees"}:
-            return "text_mute"
-        return "accent"
-
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-
-        accent = QtGui.QColor(COLORS[self._color_key()])
-        fill = QtGui.QColor(accent)
-        fill.setAlpha(24)
-        outline = QtGui.QColor(accent)
-        outline.setAlpha(72)
-        painter.setPen(QtGui.QPen(outline, 1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(QtCore.QRectF(1.5, 1.5, 21.0, 21.0), 5.0, 5.0)
-
-        pen = QtGui.QPen(accent, 1.55)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        kind = self._kind
-
-        if kind in {"get_pseudocode", "read_pseudocode"}:
-            painter.drawLine(QtCore.QPointF(9.0, 8.0), QtCore.QPointF(6.0, 12.0))
-            painter.drawLine(QtCore.QPointF(6.0, 12.0), QtCore.QPointF(9.0, 16.0))
-            painter.drawLine(QtCore.QPointF(15.0, 8.0), QtCore.QPointF(18.0, 12.0))
-            painter.drawLine(QtCore.QPointF(18.0, 12.0), QtCore.QPointF(15.0, 16.0))
-            painter.drawLine(QtCore.QPointF(13.5, 7.5), QtCore.QPointF(10.5, 16.5))
-        elif kind in {"reverse_functions", "callees", "virtual_call"}:
-            painter.drawLine(QtCore.QPointF(8.0, 12.0), QtCore.QPointF(15.0, 8.0))
-            painter.drawLine(QtCore.QPointF(8.0, 12.0), QtCore.QPointF(15.0, 16.0))
-            painter.setBrush(accent)
-            for point in ((7.0, 12.0), (16.0, 7.5), (16.0, 16.5)):
-                painter.drawEllipse(QtCore.QPointF(*point), 1.8, 1.8)
-        elif kind in {"get_memory", "struct_created", "struct_updated"}:
-            painter.drawRoundedRect(QtCore.QRectF(7.0, 7.0, 10.0, 10.0), 1.5, 1.5)
-            for pos in (9.0, 12.0, 15.0):
-                painter.drawLine(QtCore.QPointF(pos, 5.0), QtCore.QPointF(pos, 7.0))
-                painter.drawLine(QtCore.QPointF(pos, 17.0), QtCore.QPointF(pos, 19.0))
-                painter.drawLine(QtCore.QPointF(5.0, pos), QtCore.QPointF(7.0, pos))
-                painter.drawLine(QtCore.QPointF(17.0, pos), QtCore.QPointF(19.0, pos))
-        elif kind in {"get_value_from_name", "investigate"}:
-            painter.drawEllipse(QtCore.QRectF(6.5, 6.5, 8.5, 8.5))
-            painter.drawLine(QtCore.QPointF(14.0, 14.0), QtCore.QPointF(18.0, 18.0))
-            painter.drawLine(QtCore.QPointF(9.0, 10.8), QtCore.QPointF(12.5, 10.8))
-        elif kind == "function_rename":
-            pencil = QtGui.QPainterPath()
-            pencil.moveTo(7.5, 14.8)
-            pencil.lineTo(14.6, 7.7)
-            pencil.quadTo(15.5, 6.8, 16.4, 7.7)
-            pencil.lineTo(17.3, 8.6)
-            pencil.quadTo(18.2, 9.5, 17.3, 10.4)
-            pencil.lineTo(10.2, 17.5)
-            pencil.lineTo(6.2, 18.8)
-            pencil.closeSubpath()
-            painter.drawPath(pencil)
-            painter.drawLine(QtCore.QPointF(7.5, 14.8), QtCore.QPointF(10.2, 17.5))
-            painter.drawLine(QtCore.QPointF(14.3, 8.0), QtCore.QPointF(17.0, 10.7))
-        elif kind in {"local_renames", "parameter_renames", "global_rename"}:
-            painter.drawLine(QtCore.QPointF(7.0, 16.5), QtCore.QPointF(15.5, 8.0))
-            painter.drawLine(QtCore.QPointF(14.0, 7.0), QtCore.QPointF(17.0, 10.0))
-            painter.drawLine(QtCore.QPointF(6.5, 17.5), QtCore.QPointF(10.0, 16.5))
-        elif kind == "refining":
-            painter.drawArc(QtCore.QRectF(6.5, 6.5, 11.0, 11.0), 25 * 16, 275 * 16)
-            path = QtGui.QPainterPath()
-            path.moveTo(16.5, 6.5)
-            path.lineTo(17.5, 10.0)
-            path.lineTo(14.0, 9.0)
-            painter.drawPath(path)
-        elif kind in self._NOTE_TOOLS or kind == "sectioned_analysis":
-            painter.drawRoundedRect(QtCore.QRectF(7.0, 5.5, 10.0, 13.0), 1.2, 1.2)
-            painter.drawLine(QtCore.QPointF(9.5, 9.0), QtCore.QPointF(14.5, 9.0))
-            painter.drawLine(QtCore.QPointF(9.5, 12.0), QtCore.QPointF(14.5, 12.0))
-            painter.drawLine(QtCore.QPointF(9.5, 15.0), QtCore.QPointF(13.0, 15.0))
-        elif kind in {"success", "result", "done", "completed"}:
-            painter.drawLine(QtCore.QPointF(7.0, 12.5), QtCore.QPointF(10.5, 16.0))
-            painter.drawLine(QtCore.QPointF(10.5, 16.0), QtCore.QPointF(17.5, 8.5))
-        elif kind in {"error", "failed"}:
-            painter.drawLine(QtCore.QPointF(8.0, 8.0), QtCore.QPointF(16.0, 16.0))
-            painter.drawLine(QtCore.QPointF(16.0, 8.0), QtCore.QPointF(8.0, 16.0))
-        elif kind in {"warn", "warning", "skipped", "skipped_callees"}:
-            painter.drawLine(QtCore.QPointF(12.0, 7.0), QtCore.QPointF(12.0, 13.0))
-            painter.drawPoint(QtCore.QPointF(12.0, 16.5))
-        else:
-            painter.drawEllipse(QtCore.QPointF(12.0, 8.0), 0.8, 0.8)
-            painter.drawLine(QtCore.QPointF(12.0, 11.0), QtCore.QPointF(12.0, 17.0))
+        _paint_activity_icon(painter, self._kind)
 
 
 class _ActivityActionRow(QtWidgets.QWidget):
@@ -1566,12 +1618,14 @@ class _ActivityActionRow(QtWidgets.QWidget):
         text_layout.setContentsMargins(0, 1, 0, 1)
         text_layout.setSpacing(1)
         self._label = QtWidgets.QLabel(str(label or "Activity"))
+        self._label.setObjectName("activityActionLabel")
         self._label.setWordWrap(True)
         self._label.setMinimumWidth(0)
         self._label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         text_layout.addWidget(self._label)
 
         self._detail = QtWidgets.QLabel(str(detail or ""))
+        self._detail.setObjectName("activityActionDetail")
         self._detail.setWordWrap(True)
         self._detail.setMinimumWidth(0)
         self._detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1608,14 +1662,6 @@ class _ActivityActionRow(QtWidgets.QWidget):
             painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
 
     def restyle(self) -> None:
-        self._label.setStyleSheet(
-            f"color: {COLORS['text_dim']}; font-family: {FONT_SANS};"
-            " font-size: 12px; background: transparent;"
-        )
-        self._detail.setStyleSheet(
-            f"color: {COLORS['text_mute']}; font-family: {FONT_MONO};"
-            " font-size: 10px; background: transparent;"
-        )
         self._icon.update()
         self.update()
 
@@ -1705,123 +1751,498 @@ class _AgentTurnWidget(QtWidgets.QWidget):
         self._actions.restyle()
 
 
-class _ReversalFunctionWidget(QtWidgets.QWidget):
-    """One function-scoped section in the reversal activity transcript."""
+class _ReversalActivityTranscript(QtWidgets.QWidget):
+    """Single-widget renderer for the complete reversal activity transcript."""
 
-    def __init__(self, function_ea: str, function_name: str, parent=None):
+    _GROUP_GAP = 4
+    _ACTION_GAP = 2
+    _ICON_SIZE = 24
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._function_ea = function_ea
-        self._function_name = function_name or function_ea or "Program updates"
-        self._parent_name = ""
-        self._status = "active"
-
-        self._layout = QtWidgets.QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 3, 0, 6)
-        self._layout.setSpacing(6)
-        _constrain_layout_to_minimum(self._layout)
-
-        self._header = QtWidgets.QFrame()
-        self._header.setObjectName("reversalFunctionHeader")
-        header_layout = QtWidgets.QVBoxLayout(self._header)
-        header_layout.setContentsMargins(10, 2, 0, 3)
-        header_layout.setSpacing(1)
-
-        self._title = QtWidgets.QLabel()
-        self._title.setWordWrap(True)
-        self._title.setMinimumWidth(0)
-        self._title.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        header_layout.addWidget(self._title)
-
-        self._meta = QtWidgets.QLabel()
-        self._meta.setWordWrap(True)
-        self._meta.setMinimumWidth(0)
-        self._meta.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        header_layout.addWidget(self._meta)
-
-        self._context = QtWidgets.QLabel()
-        self._context.setWordWrap(True)
-        self._context.setMinimumWidth(0)
-        self._context.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._context.hide()
-        header_layout.addWidget(self._context)
-
-        self._actions = _ActivityActionList()
-        self._layout.addWidget(self._header)
-        self._layout.addWidget(self._actions)
+        self._groups: dict[str, dict] = {}
+        self._order: list[str] = []
+        self._layout_width = -1
+        self._content_height = 0
+        self._layout_refresh_pending = False
+        self._hovered_action: Optional[tuple[str, int]] = None
+        self.setMouseTracking(True)
         self.setMinimumWidth(0)
-        self.restyle()
-        self._refresh_header()
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Minimum,
+        )
+        self.setAccessibleName("Reversal activity")
+        self._init_fonts()
 
-    def apply_identity(
+    def _init_fonts(self) -> None:
+        self._title_font = QtGui.QFont(FONT_SANS)
+        self._title_font.setPixelSize(12)
+        self._title_font.setBold(True)
+        self._meta_font = QtGui.QFont(FONT_MONO)
+        self._meta_font.setPixelSize(10)
+        self._context_font = QtGui.QFont(FONT_SANS)
+        self._context_font.setPixelSize(11)
+        self._label_font = QtGui.QFont(FONT_SANS)
+        self._label_font.setPixelSize(12)
+        self._detail_font = QtGui.QFont(FONT_MONO)
+        self._detail_font.setPixelSize(10)
+        self._title_metrics = QtGui.QFontMetrics(self._title_font)
+        self._meta_metrics = QtGui.QFontMetrics(self._meta_font)
+        self._context_metrics = QtGui.QFontMetrics(self._context_font)
+        self._label_metrics = QtGui.QFontMetrics(self._label_font)
+        self._detail_metrics = QtGui.QFontMetrics(self._detail_font)
+
+    @staticmethod
+    def _text_flags():
+        return Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap
+
+    def _measure_text(
         self,
-        function_name: str,
-        parent_name: str,
-    ) -> None:
-        if function_name:
-            self._function_name = function_name
-        if parent_name:
-            self._parent_name = parent_name
-        self._refresh_header()
+        metrics: QtGui.QFontMetrics,
+        text: str,
+        width: int,
+    ) -> int:
+        if not text:
+            return 0
+        bounds = metrics.boundingRect(
+            QtCore.QRect(0, 0, max(1, width), 100_000),
+            self._text_flags(),
+            text,
+        )
+        return max(metrics.height(), bounds.height())
 
-    def set_investigating(self, detail: str) -> None:
-        self._status = "active"
-        self._context.setText(detail)
-        self._context.setVisible(bool(detail))
-        self._refresh_header()
+    def append_activities(self, activities: list[dict]) -> int:
+        dirty: set[str] = set()
+        added = 0
+        for activity in activities:
+            action = str(activity.get("action", "") or "").strip()
+            label = str(activity.get("label", "") or "").strip()
+            if not action or not label:
+                continue
 
-    def append_action(self, kind: str, label: str, detail: str = "") -> None:
-        self._actions.add_action(kind, label, detail)
-        self._layout.invalidate()
-        self.updateGeometry()
+            function_ea = str(
+                activity.get("function_ea", "") or ""
+            ).strip()
+            function_name = str(
+                activity.get("function_name", "") or ""
+            ).strip()
+            parent_name = str(
+                activity.get("parent_name", "") or ""
+            ).strip()
+            detail = str(activity.get("detail", "") or "").strip()
+            status = str(activity.get("status", "") or "").strip()
+            items = activity.get("items", [])
+            if not isinstance(items, list):
+                items = []
 
-    def set_status(self, status: str) -> None:
-        if status:
-            self._status = status
-            self._refresh_header()
-            self.restyle()
+            key = function_ea or f"program:{function_name or 'updates'}"
+            group = self._groups.get(key)
+            if group is None:
+                group = {
+                    "ea": function_ea,
+                    "name": function_name or function_ea or "Program updates",
+                    "parent": "",
+                    "status": "active",
+                    "context": "",
+                    "actions": [],
+                    "layout": None,
+                    "y": 0,
+                }
+                self._groups[key] = group
+                self._order.append(key)
 
-    def _refresh_header(self) -> None:
+            if function_name:
+                group["name"] = function_name
+            if parent_name:
+                group["parent"] = parent_name
+            if action == "investigate":
+                group["status"] = "active"
+                group["context"] = detail
+            else:
+                detail_lines = []
+                if detail:
+                    detail_lines.append(detail)
+                detail_lines.extend(
+                    str(item).strip()
+                    for item in items
+                    if str(item).strip()
+                )
+                group["actions"].append(
+                    {
+                        "kind": action,
+                        "label": label,
+                        "detail": "\n".join(detail_lines),
+                    }
+                )
+            if status:
+                group["status"] = status
+            dirty.add(key)
+            added += 1
+
+        if added:
+            self._relayout(dirty)
+        return added
+
+    @staticmethod
+    def _group_title(group: dict) -> str:
         prefix = {
             "done": "Investigated",
             "failed": "Could not analyse",
             "skipped": "Skipped",
-        }.get(self._status, "Investigating")
-        if not self._function_ea and self._function_name == "Program updates":
-            self._title.setText(self._function_name)
-        else:
-            self._title.setText(f"{prefix} {self._function_name}")
+        }.get(group["status"], "Investigating")
+        if not group["ea"] and group["name"] == "Program updates":
+            return group["name"]
+        return f"{prefix} {group['name']}"
 
-        meta = []
-        if self._function_ea:
-            meta.append(self._function_ea)
-        if self._parent_name:
-            meta.append(f"called by {self._parent_name}")
-        self._meta.setText("  ·  ".join(meta))
-        self._meta.setVisible(bool(meta))
+    @staticmethod
+    def _group_meta(group: dict) -> str:
+        parts = []
+        if group["ea"]:
+            parts.append(group["ea"])
+        if group["parent"]:
+            parts.append(f"called by {group['parent']}")
+        return "  ·  ".join(parts)
+
+    def _build_group_layout(self, group: dict, width: int) -> dict:
+        text_x = 10
+        text_width = max(1, width - text_x)
+        cursor = 5
+
+        title = self._group_title(group)
+        title_h = self._measure_text(
+            self._title_metrics,
+            title,
+            text_width,
+        )
+        title_rect = (text_x, cursor, text_width, title_h)
+        cursor += title_h
+
+        meta = self._group_meta(group)
+        meta_rect = None
+        if meta:
+            cursor += 1
+            meta_h = self._measure_text(
+                self._meta_metrics,
+                meta,
+                text_width,
+            )
+            meta_rect = (text_x, cursor, text_width, meta_h)
+            cursor += meta_h
+
+        context = group["context"]
+        context_rect = None
+        if context:
+            cursor += 1
+            context_h = self._measure_text(
+                self._context_metrics,
+                context,
+                text_width,
+            )
+            context_rect = (text_x, cursor, text_width, context_h)
+            cursor += context_h
+
+        header_bottom = cursor + 3
+        cursor = header_bottom
+        action_layouts = []
+        actions = group["actions"]
+        if actions:
+            cursor += 6
+        action_text_x = 35
+        action_text_width = max(1, width - action_text_x - 8)
+        for index, action in enumerate(actions):
+            if index:
+                cursor += self._ACTION_GAP
+            row_y = cursor
+            label_h = self._measure_text(
+                self._label_metrics,
+                action["label"],
+                action_text_width,
+            )
+            label_rect = (
+                action_text_x,
+                row_y + 4,
+                action_text_width,
+                label_h,
+            )
+            detail_rect = None
+            text_height = label_h
+            if action["detail"]:
+                detail_h = self._measure_text(
+                    self._detail_metrics,
+                    action["detail"],
+                    action_text_width,
+                )
+                detail_rect = (
+                    action_text_x,
+                    row_y + 5 + label_h,
+                    action_text_width,
+                    detail_h,
+                )
+                text_height += 1 + detail_h
+            row_h = max(self._ICON_SIZE, text_height + 2) + 6
+            action_layouts.append(
+                {
+                    "kind": action["kind"],
+                    "label": action["label"],
+                    "detail": action["detail"],
+                    "rect": (0, row_y, width, row_h),
+                    "icon_y": row_y + 3,
+                    "label_rect": label_rect,
+                    "detail_rect": detail_rect,
+                }
+            )
+            cursor += row_h
+
+        return {
+            "height": cursor + 6,
+            "header_top": 3,
+            "header_bottom": header_bottom,
+            "title": title,
+            "title_rect": title_rect,
+            "meta": meta,
+            "meta_rect": meta_rect,
+            "context": context,
+            "context_rect": context_rect,
+            "actions": action_layouts,
+        }
+
+    def _relayout(self, dirty: set[str]) -> None:
+        width = max(120, self.width())
+        if width != self._layout_width:
+            dirty = set(self._order)
+            self._layout_width = width
+
+        for key in dirty:
+            group = self._groups.get(key)
+            if group is not None:
+                group["layout"] = self._build_group_layout(group, width)
+
+        y = 0
+        for index, key in enumerate(self._order):
+            group = self._groups[key]
+            group["y"] = y
+            layout = group["layout"]
+            if layout is None:
+                layout = self._build_group_layout(group, width)
+                group["layout"] = layout
+            y += layout["height"]
+            if index + 1 < len(self._order):
+                y += self._GROUP_GAP
+
+        self._content_height = y
+        minimum_height = max(0, y)
+        if self.minimumHeight() != minimum_height:
+            self.setMinimumHeight(minimum_height)
+        self.updateGeometry()
+        self.update()
+
+    def _schedule_full_relayout(self) -> None:
+        if self._layout_refresh_pending:
+            return
+        self._layout_refresh_pending = True
+        QtCore.QTimer.singleShot(0, self._full_relayout)
+
+    def _full_relayout(self) -> None:
+        self._layout_refresh_pending = False
+        self._layout_width = -1
+        self._relayout(set(self._order))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self._schedule_full_relayout()
+
+    def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
+        return QtCore.QSize(max(120, self.width()), self._content_height)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # type: ignore[override]
+        return self.sizeHint()
+
+    @staticmethod
+    def _translated_rect(rect: tuple, y_offset: int) -> QtCore.QRectF:
+        return QtCore.QRectF(
+            rect[0],
+            rect[1] + y_offset,
+            rect[2],
+            rect[3],
+        )
+
+    def _draw_text(
+        self,
+        painter: QtGui.QPainter,
+        font: QtGui.QFont,
+        color_key: str,
+        rect: tuple,
+        y_offset: int,
+        text: str,
+    ) -> None:
+        if not text:
+            return
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(COLORS[color_key]))
+        painter.drawText(
+            self._translated_rect(rect, y_offset),
+            self._text_flags(),
+            text,
+        )
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        clip_top = event.rect().top()
+        clip_bottom = event.rect().bottom()
+
+        for key in self._order:
+            group = self._groups[key]
+            layout = group["layout"]
+            if layout is None:
+                continue
+            group_y = group["y"]
+            group_bottom = group_y + layout["height"]
+            if group_bottom < clip_top:
+                continue
+            if group_y > clip_bottom:
+                break
+
+            status_color = {
+                "done": "done",
+                "failed": "failed",
+                "skipped": "text_mute",
+            }.get(group["status"], "accent")
+            header_pen = QtGui.QPen(
+                QtGui.QColor(COLORS[status_color]),
+                2,
+            )
+            painter.setPen(header_pen)
+            painter.drawLine(
+                QtCore.QPointF(1, group_y + layout["header_top"]),
+                QtCore.QPointF(1, group_y + layout["header_bottom"]),
+            )
+            self._draw_text(
+                painter,
+                self._title_font,
+                "text",
+                layout["title_rect"],
+                group_y,
+                layout["title"],
+            )
+            if layout["meta_rect"] is not None:
+                self._draw_text(
+                    painter,
+                    self._meta_font,
+                    "text_mute",
+                    layout["meta_rect"],
+                    group_y,
+                    layout["meta"],
+                )
+            if layout["context_rect"] is not None:
+                self._draw_text(
+                    painter,
+                    self._context_font,
+                    "text_dim",
+                    layout["context_rect"],
+                    group_y,
+                    layout["context"],
+                )
+
+            actions = layout["actions"]
+            if len(actions) > 1:
+                first_center = (
+                    group_y + actions[0]["icon_y"] + self._ICON_SIZE / 2
+                )
+                last_center = (
+                    group_y + actions[-1]["icon_y"] + self._ICON_SIZE / 2
+                )
+                line_pen = QtGui.QPen(
+                    QtGui.QColor(COLORS["border_hi"]),
+                    1.25,
+                )
+                line_pen.setCapStyle(Qt.RoundCap)
+                painter.setPen(line_pen)
+                painter.drawLine(
+                    QtCore.QPointF(14, first_center),
+                    QtCore.QPointF(14, last_center),
+                )
+
+            for action_index, action in enumerate(actions):
+                row_rect = self._translated_rect(
+                    action["rect"],
+                    group_y,
+                )
+                if row_rect.bottom() < clip_top:
+                    continue
+                if row_rect.top() > clip_bottom:
+                    break
+                if self._hovered_action == (key, action_index):
+                    hover = QtGui.QColor(COLORS["accent"])
+                    hover.setAlpha(11)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(hover)
+                    painter.drawRoundedRect(
+                        row_rect.adjusted(0.5, 0.5, -0.5, -0.5),
+                        5,
+                        5,
+                    )
+                _paint_activity_icon(
+                    painter,
+                    action["kind"],
+                    QtCore.QPointF(2, group_y + action["icon_y"]),
+                )
+                self._draw_text(
+                    painter,
+                    self._label_font,
+                    "text_dim",
+                    action["label_rect"],
+                    group_y,
+                    action["label"],
+                )
+                if action["detail_rect"] is not None:
+                    self._draw_text(
+                        painter,
+                        self._detail_font,
+                        "text_mute",
+                        action["detail_rect"],
+                        group_y,
+                        action["detail"],
+                    )
+
+    def _action_at_y(self, y: int) -> Optional[tuple[str, int]]:
+        for key in self._order:
+            group = self._groups[key]
+            layout = group["layout"]
+            if layout is None:
+                continue
+            group_y = group["y"]
+            if y < group_y:
+                return None
+            if y >= group_y + layout["height"]:
+                continue
+            for index, action in enumerate(layout["actions"]):
+                row_y = group_y + action["rect"][1]
+                if row_y <= y < row_y + action["rect"][3]:
+                    return key, index
+            return None
+        return None
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        position = getattr(event, "position", None)
+        point = position().toPoint() if callable(position) else event.pos()
+        hovered = self._action_at_y(point.y())
+        if hovered != self._hovered_action:
+            self._hovered_action = hovered
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        if self._hovered_action is not None:
+            self._hovered_action = None
+            self.update()
+        super().leaveEvent(event)
 
     def restyle(self) -> None:
-        status_color = {
-            "done": COLORS["done"],
-            "failed": COLORS["failed"],
-            "skipped": COLORS["text_mute"],
-        }.get(self._status, COLORS["accent"])
-        self._header.setStyleSheet(
-            "QFrame#reversalFunctionHeader { background: transparent;"
-            f" border-left: 2px solid {status_color}; }}"
-        )
-        self._title.setStyleSheet(
-            f"color: {COLORS['text']}; font-family: {FONT_SANS};"
-            " font-size: 12px; font-weight: 600; background: transparent;"
-        )
-        self._meta.setStyleSheet(
-            f"color: {COLORS['text_mute']}; font-family: {FONT_MONO};"
-            " font-size: 10px; background: transparent;"
-        )
-        self._context.setStyleSheet(
-            f"color: {COLORS['text_dim']}; font-family: {FONT_SANS};"
-            " font-size: 11px; background: transparent;"
-        )
-        self._actions.restyle()
+        self._init_fonts()
+        self._full_relayout()
 
 
 class WorkingWidget(QtWidgets.QWidget):
@@ -2004,12 +2425,16 @@ class WorkingLogPane(QtWidgets.QWidget):
     """Borderless, collapsible transcript for engine narration and tools."""
 
     _MAX_LOG_H = 340
+    _REVERSAL_BATCH_SIZE = 12
+    _REVERSAL_BATCH_DELAY_MS = 16
 
     def _get_log_h(self) -> int:
         return self.maximumHeight()
 
     def _set_log_h(self, h: int) -> None:
         height = max(0, int(h))
+        if self.minimumHeight() == height and self.maximumHeight() == height:
+            return
         self.setMinimumHeight(height)
         self.setMaximumHeight(height)
         self.updateGeometry()
@@ -2023,14 +2448,19 @@ class WorkingLogPane(QtWidgets.QWidget):
         self._pending_agent_turn = 0
         self._active_agent_turn = 0
         self._turns: dict[int, _AgentTurnWidget] = {}
-        self._reversal_groups: dict[str, _ReversalFunctionWidget] = {}
+        self._reversal_transcript: Optional[
+            _ReversalActivityTranscript
+        ] = None
         self._reversal_function_eas: set[str] = set()
         self._reversal_change_count = 0
+        self._pending_reversal_activities: deque[dict] = deque()
         self._has_reversal_activity = False
         self._action_count = 0
         self._height_update_pending = False
+        self._scroll_update_pending = False
         self._height_animating = False
         self._refresh_after_animation = False
+        self._content_height_saturated = False
         self._general_actions: Optional[_ActivityActionList] = None
         header._log_pane_ref = self
         self._build_ui()
@@ -2072,18 +2502,25 @@ class WorkingLogPane(QtWidgets.QWidget):
         self._anim.setEasingCurve(QEasingCurve.InOutCubic)
         self._anim.finished.connect(self._on_height_animation_finished)
 
+        self._reversal_flush_timer = QtCore.QTimer(self)
+        self._reversal_flush_timer.setSingleShot(True)
+        self._reversal_flush_timer.timeout.connect(
+            self.flush_pending_reversal_activities
+        )
+
     def toggle_expand(self) -> None:
         self.set_expanded(not self._expanded)
 
     def set_expanded(self, expanded: bool) -> None:
         expanded = bool(expanded)
         if expanded == self._expanded:
-            if expanded:
-                self._schedule_height_refresh()
             return
         self._expanded = expanded
         self._header.set_chevron(expanded)
-        self._animate_height(self._expanded_target_height() if expanded else 0)
+        target = self._expanded_target_height() if expanded else 0
+        if expanded:
+            self._content_height_saturated = target >= self._MAX_LOG_H
+        self._animate_height(target)
 
     def _animate_height(self, target: int) -> None:
         start = self.maximumHeight()
@@ -2112,7 +2549,8 @@ class WorkingLogPane(QtWidgets.QWidget):
             120,
             self._scroll.viewport().width() - margins.left() - margins.right(),
         )
-        heights = []
+        content_height = margins.top() + margins.bottom()
+        widget_count = 0
         for index in range(self._content_layout.count()):
             widget = self._content_layout.itemAt(index).widget()
             if widget is None:
@@ -2128,15 +2566,14 @@ class WorkingLogPane(QtWidgets.QWidget):
                 wrapped_height = layout.heightForWidth(content_width)
                 if wrapped_height > 0:
                     height = wrapped_height
-            heights.append(max(0, height))
-        if not heights:
+            if widget_count:
+                content_height += self._content_layout.spacing()
+            content_height += max(0, height)
+            widget_count += 1
+            if content_height >= self._MAX_LOG_H:
+                return self._MAX_LOG_H
+        if not widget_count:
             return 0
-        content_height = (
-            margins.top()
-            + margins.bottom()
-            + sum(heights)
-            + self._content_layout.spacing() * max(0, len(heights) - 1)
-        )
         content_height = max(
             content_height,
             self._content_layout.minimumSize().height(),
@@ -2150,14 +2587,32 @@ class WorkingLogPane(QtWidgets.QWidget):
         self._height_update_pending = True
         QtCore.QTimer.singleShot(0, self._refresh_height)
 
+    def _schedule_scroll_to_end(self) -> None:
+        if self._scroll_update_pending:
+            return
+        self._scroll_update_pending = True
+        QtCore.QTimer.singleShot(0, self._scroll_to_end)
+
     def _refresh_height(self) -> None:
         self._height_update_pending = False
         if self._expanded:
-            self._animate_height(self._expanded_target_height())
-        QtCore.QTimer.singleShot(0, self._scroll_to_end)
+            target = self._expanded_target_height()
+            self._content_height_saturated = target >= self._MAX_LOG_H
+            if self._height_animating:
+                self._refresh_after_animation = True
+            else:
+                self._set_log_h(target)
+        self._schedule_scroll_to_end()
 
     def _content_changed(self) -> None:
         self._content.updateGeometry()
+        if (
+            self._expanded
+            and self._content_height_saturated
+            and not self._height_animating
+        ):
+            self._schedule_scroll_to_end()
+            return
         self._schedule_height_refresh()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -2166,6 +2621,7 @@ class WorkingLogPane(QtWidgets.QWidget):
         width_changed = old_width < 0 or old_width != event.size().width()
         if not self._expanded or not width_changed:
             return
+        self._content_height_saturated = False
         if self._height_animating:
             self._refresh_after_animation = True
         else:
@@ -2239,59 +2695,86 @@ class WorkingLogPane(QtWidgets.QWidget):
         )
 
     def append_reversal_activity(self, activity: dict) -> None:
-        action = str(activity.get("action", "") or "").strip()
-        label = str(activity.get("label", "") or "").strip()
-        if not action or not label:
+        self._append_reversal_activities([activity])
+
+    def queue_reversal_activity(self, activity: dict) -> None:
+        if not isinstance(activity, dict):
+            return
+        self._pending_reversal_activities.append(activity)
+        if not self._reversal_flush_timer.isActive():
+            self._reversal_flush_timer.start(self._REVERSAL_BATCH_DELAY_MS)
+
+    def flush_pending_reversal_activities(self, drain: bool = False) -> None:
+        self._reversal_flush_timer.stop()
+        if not self._pending_reversal_activities:
             return
 
-        function_ea = str(activity.get("function_ea", "") or "").strip()
-        function_name = str(activity.get("function_name", "") or "").strip()
-        parent_name = str(activity.get("parent_name", "") or "").strip()
-        detail = str(activity.get("detail", "") or "").strip()
-        status = str(activity.get("status", "") or "").strip()
-        items = activity.get("items", [])
-        if not isinstance(items, list):
-            items = []
+        count = (
+            len(self._pending_reversal_activities)
+            if drain
+            else min(
+                self._REVERSAL_BATCH_SIZE,
+                len(self._pending_reversal_activities),
+            )
+        )
+        activities = [
+            self._pending_reversal_activities.popleft()
+            for _ in range(count)
+        ]
+        self._append_reversal_activities(activities)
 
+        if self._pending_reversal_activities:
+            self._reversal_flush_timer.start(self._REVERSAL_BATCH_DELAY_MS)
+
+    def _append_reversal_activities(self, activities: list[dict]) -> None:
+        valid = []
+        for activity in activities:
+            action = str(activity.get("action", "") or "").strip()
+            label = str(activity.get("label", "") or "").strip()
+            if not action or not label:
+                continue
+            valid.append(activity)
+
+            function_ea = str(
+                activity.get("function_ea", "") or ""
+            ).strip()
+            items = activity.get("items", [])
+            if not isinstance(items, list):
+                items = []
+            if (
+                action == "investigate"
+                and function_ea
+                and function_ea not in self._reversal_function_eas
+            ):
+                self._reversal_function_eas.add(function_ea)
+            if action in {
+                "function_rename",
+                "global_rename",
+                "struct_created",
+                "struct_updated",
+            }:
+                self._reversal_change_count += 1
+            elif action in {"local_renames", "parameter_renames"}:
+                self._reversal_change_count += max(1, len(items))
+
+        if not valid:
+            return
         if not self._has_reversal_activity:
             self._has_reversal_activity = True
             if self._general_actions is not None:
                 self._content_layout.removeWidget(self._general_actions)
                 self._general_actions.deleteLater()
                 self._general_actions = None
+        if self._reversal_transcript is None:
+            self._reversal_transcript = _ReversalActivityTranscript()
+            self._content_layout.addWidget(self._reversal_transcript)
 
-        key = function_ea or f"program:{function_name or 'updates'}"
-        group = self._reversal_groups.get(key)
-        if group is None:
-            group = _ReversalFunctionWidget(function_ea, function_name)
-            self._reversal_groups[key] = group
-            self._content_layout.addWidget(group)
-        group.apply_identity(function_name, parent_name)
+        self._reversal_transcript.append_activities(valid)
+        self._refresh_reversal_summary()
+        self.set_expanded(True)
+        self._content_changed()
 
-        if action == "investigate":
-            group.set_investigating(detail)
-            if function_ea and function_ea not in self._reversal_function_eas:
-                self._reversal_function_eas.add(function_ea)
-        else:
-            detail_lines = []
-            if detail:
-                detail_lines.append(detail)
-            detail_lines.extend(
-                str(item).strip() for item in items if str(item).strip()
-            )
-            group.append_action(action, label, "\n".join(detail_lines))
-
-        group.set_status(status)
-        if action in {
-            "function_rename",
-            "global_rename",
-            "struct_created",
-            "struct_updated",
-        }:
-            self._reversal_change_count += 1
-        elif action in {"local_renames", "parameter_renames"}:
-            self._reversal_change_count += max(1, len(items))
-
+    def _refresh_reversal_summary(self) -> None:
         summary_parts = []
         function_count = len(self._reversal_function_eas)
         if function_count:
@@ -2301,8 +2784,6 @@ class WorkingLogPane(QtWidgets.QWidget):
             noun = "change" if self._reversal_change_count == 1 else "changes"
             summary_parts.append(f"{self._reversal_change_count} {noun}")
         self._header.set_summary_meta("  ·  ".join(summary_parts))
-        self.set_expanded(True)
-        self._content_changed()
 
     def append_log(self, msg_type: str, text: str) -> None:
         text = str(text or "").strip()
@@ -2316,14 +2797,15 @@ class WorkingLogPane(QtWidgets.QWidget):
         self._content_changed()
 
     def _scroll_to_end(self) -> None:
+        self._scroll_update_pending = False
         scrollbar = self._scroll.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     def restyle(self) -> None:
         for turn in self._turns.values():
             turn.restyle()
-        for group in self._reversal_groups.values():
-            group.restyle()
+        if self._reversal_transcript is not None:
+            self._reversal_transcript.restyle()
         if self._general_actions is not None:
             self._general_actions.restyle()
         self._content.update()
@@ -3283,150 +3765,6 @@ class ChatMessageWidget(QtWidgets.QWidget):
                 self._body.setMaximumWidth(max(1, target_w - 26))
 
 
-class UsageLimitOverlay(QtWidgets.QFrame):
-    """Floating placeholder usage detail panel, clamped inside the dialog."""
-
-    _MARGIN_X = 16
-    _MARGIN_TOP = 8
-    _MARGIN_BOTTOM = 12
-    _TITLE_H = 14
-    _ROW_H = 24
-    _ROW_GAP = 6
-    _ARC_RADIUS = 9
-    _ARC_WIDTH = 3
-    _ARC_TEXT_GAP = 10
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent; border: none;")
-        self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Minimum)
-        self.hide()
-
-        self._five_hour_pct = 0.38
-        self._month_pct = 0.21
-        self._five_hour_value = "38%"
-        self._month_value = "21%"
-        self.adjustSize()
-
-    def set_usage(
-        self,
-        five_hour_pct: float,
-        month_pct: float,
-        five_hour_value: str = "",
-        month_value: str = "",
-    ) -> None:
-        self._five_hour_pct = max(0.0, min(1.0, five_hour_pct))
-        self._month_pct = max(0.0, min(1.0, month_pct))
-        self._five_hour_value = five_hour_value or f"{int(self._five_hour_pct * 100)}%"
-        self._month_value = month_value or f"{int(self._month_pct * 100)}%"
-        self.updateGeometry()
-        self.adjustSize()
-        self.update()
-
-    def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
-        title_font, row_font = self._fonts()
-        title_w = QtGui.QFontMetrics(title_font).horizontalAdvance("Usage limits")
-        row_fm = QtGui.QFontMetrics(row_font)
-        title_h = self._title_height(title_font)
-        row_h = self._row_height(row_font)
-        rows = (
-            f"5 hour limit: {self._five_hour_value}",
-            f"Monthly limit: {self._month_value}",
-        )
-        row_w = max(row_fm.horizontalAdvance(row) for row in rows)
-        arc_w = self._ARC_RADIUS * 2 + self._ARC_TEXT_GAP
-        width = self._MARGIN_X * 2 + max(title_w, arc_w + row_w)
-        height = (
-            self._MARGIN_TOP
-            + title_h
-            + 8
-            + row_h * 2
-            + self._ROW_GAP
-            + self._MARGIN_BOTTOM
-        )
-        return QtCore.QSize(max(170, width), height)
-
-    def minimumSizeHint(self) -> QtCore.QSize:  # type: ignore[override]
-        return self.sizeHint()
-
-    def _fonts(self) -> tuple[QtGui.QFont, QtGui.QFont]:
-        title_font = QtGui.QFont(FONT_SANS)
-        title_font.setPixelSize(10)
-        row_font = QtGui.QFont(FONT_SANS)
-        row_font.setPixelSize(12)
-        return title_font, row_font
-
-    def _title_height(self, font: QtGui.QFont) -> int:
-        return max(self._TITLE_H, QtGui.QFontMetrics(font).height() + 2)
-
-    def _row_height(self, font: QtGui.QFont) -> int:
-        return max(self._ROW_H, QtGui.QFontMetrics(font).height() + 8)
-
-    def paintEvent(self, e):  # type: ignore[override]
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        c = COLORS
-        rect = QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        p.setBrush(QtGui.QColor(c["bg_card"]))
-        p.setPen(QtGui.QPen(QtGui.QColor(c["border_hi"]), 1))
-        p.drawRoundedRect(rect, 9, 9)
-
-        title_font, row_font = self._fonts()
-        title_h = self._title_height(title_font)
-        row_h = self._row_height(row_font)
-        p.setFont(title_font)
-        p.setPen(QtGui.QColor(c["text_mute"]))
-        p.drawText(
-            QtCore.QRectF(
-                self._MARGIN_X,
-                self._MARGIN_TOP,
-                self.width() - self._MARGIN_X * 2,
-                title_h,
-            ),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            "Usage limits",
-        )
-
-        first_row_y = self._MARGIN_TOP + title_h + 8
-        second_row_y = first_row_y + row_h + self._ROW_GAP
-        self._draw_row(p, first_row_y, row_h, "5 hour limit", self._five_hour_value, self._five_hour_pct, c["accent"], row_font)
-        self._draw_row(p, second_row_y, row_h, "Monthly limit", self._month_value, self._month_pct, c["done"], row_font)
-
-        p.end()
-
-    def _draw_row(self, p, y: int, row_h: int, label: str, value: str, pct: float, color: str, font) -> None:
-        center = QtCore.QPointF(self._MARGIN_X + self._ARC_RADIUS, y + row_h / 2)
-        self._draw_arc(p, center, self._ARC_RADIUS, pct, color, self._ARC_WIDTH)
-        p.setFont(font)
-        p.setPen(QtGui.QColor(COLORS["text"]))
-        p.drawText(
-            QtCore.QRectF(
-                center.x() + self._ARC_RADIUS + self._ARC_TEXT_GAP,
-                y,
-                self.width() - center.x() - self._ARC_RADIUS - self._ARC_TEXT_GAP - self._MARGIN_X,
-                row_h,
-            ),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            f"{label}: {value}",
-        )
-
-    def _draw_arc(self, p, center, radius: int, pct: float, color: str, width: int) -> None:
-        base_pen = QtGui.QPen(QtGui.QColor(COLORS["border"]), width)
-        base_pen.setCapStyle(Qt.RoundCap)
-        p.setPen(base_pen)
-        box = QtCore.QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
-        p.drawArc(box, 90 * 16, -360 * 16)
-
-        arc_pen = QtGui.QPen(QtGui.QColor(color), width)
-        arc_pen.setCapStyle(Qt.RoundCap)
-        p.setPen(arc_pen)
-        p.drawArc(box, 90 * 16, int(-360 * pct * 16))
-
-
 class UsageLimitWidget(QtWidgets.QFrame):
     """Quiet, always-visible monthly usage percentage."""
 
@@ -3452,21 +3790,13 @@ class UsageLimitWidget(QtWidgets.QFrame):
     def _update_tooltip(self) -> None:
         self.setToolTip(f"Monthly usage: {self._month_value}")
 
-    def enterEvent(self, event) -> None:  # type: ignore[override]
-        super().enterEvent(event)
-        self.update()
-
-    def leaveEvent(self, event) -> None:  # type: ignore[override]
-        super().leaveEvent(event)
-        self.update()
-
     def paintEvent(self, e):  # type: ignore[override]
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
         c = COLORS
         rect = QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        p.setBrush(QtGui.QColor(c["bg_input"] if not self.underMouse() else c["bg_card_hi"]))
+        p.setBrush(QtGui.QColor(c["bg_input"]))
         p.setPen(QtGui.QPen(QtGui.QColor(c["border_hi"]), 1))
         p.drawRoundedRect(rect, 8, 8)
 
@@ -3842,24 +4172,10 @@ class _SessionRenameButton(_SessionActionButton):
         painter.setBrush(Qt.NoBrush)
 
         center = self.rect().center()
-        cx = center.x()
-        cy = center.y()
-        path = QtGui.QPainterPath()
-        path.moveTo(cx - 4.0, cy - 5.5)
-        path.lineTo(cx - 6.0, cy - 5.5)
-        path.lineTo(cx - 6.0, cy + 5.5)
-        path.lineTo(cx - 4.0, cy + 5.5)
-        path.moveTo(cx + 4.0, cy - 5.5)
-        path.lineTo(cx + 6.0, cy - 5.5)
-        path.lineTo(cx + 6.0, cy + 5.5)
-        path.lineTo(cx + 4.0, cy + 5.5)
-        path.moveTo(cx, cy - 4.5)
-        path.lineTo(cx, cy + 4.5)
-        path.moveTo(cx - 2.0, cy - 4.5)
-        path.lineTo(cx + 2.0, cy - 4.5)
-        path.moveTo(cx - 2.0, cy + 4.5)
-        path.lineTo(cx + 2.0, cy + 4.5)
-        painter.drawPath(path)
+        _draw_pencil_glyph(
+            painter,
+            QtCore.QPointF(float(center.x()), float(center.y())),
+        )
 
 
 class _SessionDeleteButton(_SessionActionButton):
@@ -4744,6 +5060,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self.btn_send_chat.clicked.connect(self._send_chat_message)
         self.btn_send_chat.setEnabled(False)
         self.usage_limit = UsageLimitWidget()
+        self.usage_limit.setEnabled(True)
         _if_lay.addWidget(self.chat_input, 1)
         _if_lay.addWidget(self.btn_send_chat)
         _if_lay.addWidget(self.usage_limit)
@@ -4985,8 +5302,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
                 item = self._thread_lay.takeAt(0)
                 if item and item.widget():
                     item.widget().deleteLater()
-            self.chat_input.setEnabled(False)
-            self.btn_send_chat.setEnabled(False)
+            self._set_chat_controls_enabled(False)
 
     def _session_names_load_finished(self) -> None:
         requested_account_id = self._session_names_loading_account_id
@@ -5297,14 +5613,17 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             "thinking", "result", "info", "success", "warn", "error"
         } else "info"
 
+        mode = getattr(w, "_mode", "")
         if (
-            getattr(w, "_mode", "") in {"reversing", "answering"}
-            and lp.has_reversal_activity
+            (
+                mode == "reversing"
+                or (mode == "answering" and lp.has_reversal_activity)
+            )
             and level not in {"warn", "error"}
         ):
             return
 
-        if getattr(w, "_mode", "") == "thinking":
+        if mode == "thinking":
             _clean = re.sub(r'^[^\w\s→]+\s*', '', msg).strip()
             if _clean:
                 w.set_status(_clean)
@@ -5321,14 +5640,19 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             or self._current_working._mode not in {"reversing", "answering"}
         ):
             return
-        self._current_log_pane.append_reversal_activity(activity)
-        self._schedule_scroll_to_bottom()
+        self._current_log_pane.queue_reversal_activity(activity)
+
+    def _flush_reversal_activity(self) -> None:
+        pane = self._current_log_pane
+        if pane is not None:
+            pane.flush_pending_reversal_activities(drain=True)
 
 
     def _on_answer_preparing(self) -> None:
         """Move from binary reversal to final-answer preparation."""
         if self._current_working and self._current_working._mode == "preparing_answer":
             return
+        self._flush_reversal_activity()
         if self._current_working and self._start_ts:
             self._current_working.mark_done(self._start_ts.elapsed())
         if self._current_log_pane:
@@ -5445,6 +5769,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
     def _on_stream_start(self) -> None:
         """Server started streaming the response — transition WorkingWidget and
         create the streaming text widget."""
+        self._flush_reversal_activity()
         if self._current_working and self._start_ts:
             self._current_working.mark_done(self._start_ts.elapsed())
         if self._current_log_pane:
@@ -5465,6 +5790,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         """Replace the visible mutable answer draft with the server candidate."""
         del revision
         if not self._streaming_widget:
+            self._flush_reversal_activity()
             if self._current_working and self._start_ts:
                 self._current_working.mark_done(self._start_ts.elapsed())
             self._current_working = None
@@ -5483,6 +5809,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
     def _on_done(self, report: str):
         if self._shutting_down:
             return
+        self._flush_reversal_activity()
         self.title_bar.set_dot_color("done")
         self.title_bar.set_title("Decompile.re — done")
         self.btn_cancel.hide()
@@ -5518,6 +5845,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
     def _on_error(self, err: str):
         if self._shutting_down:
             return
+        self._flush_reversal_activity()
         self.title_bar.set_dot_color("failed")
         self.title_bar.set_title("Decompile.re — failed")
         self.btn_cancel.hide()
@@ -5546,10 +5874,14 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
     # ─── Chat thread helpers ──────────────────────────────────────────────────
 
+    def _set_chat_controls_enabled(self, enabled: bool) -> None:
+        self.chat_input.setEnabled(enabled)
+        self.btn_send_chat.setEnabled(enabled)
+        self.usage_limit.setEnabled(True)
+
     def _show_chat_panel(self) -> None:
         """Enable the chat input (always visible; just unlock it)."""
-        self.chat_input.setEnabled(True)
-        self.btn_send_chat.setEnabled(True)
+        self._set_chat_controls_enabled(True)
         self.chat_input.setFocus()
 
     def _add_working_widget(self, mode: str) -> None:
@@ -5624,8 +5956,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         if self._active_entry and message:
             self._active_entry.messages.append(("AI", message))
 
-        self.chat_input.setEnabled(True)
-        self.btn_send_chat.setEnabled(True)
+        self._set_chat_controls_enabled(True)
         self._refresh_usage()
 
     def _send_chat_message(self) -> None:
@@ -5640,8 +5971,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         entry = self._active_entry
         if entry in self._chat_send_jobs:
             return
-        self.chat_input.setEnabled(False)
-        self.btn_send_chat.setEnabled(False)
+        self._set_chat_controls_enabled(False)
 
         # Record before sending so the message is captured even on error
         entry.messages.append(("You", msg))
@@ -5678,8 +6008,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             self._current_log_pane.toggle_expand()
         self._current_working = None
         self._current_log_pane = None
-        self.chat_input.setEnabled(True)
-        self.btn_send_chat.setEnabled(True)
+        self._set_chat_controls_enabled(True)
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         """Send chat message on Enter; let Shift+Enter pass through."""
@@ -5873,14 +6202,12 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             )
             self.btn_cancel.hide()
             if entry.network_only:
-                self.chat_input.setEnabled(False)
-                self.btn_send_chat.setEnabled(False)
+                self._set_chat_controls_enabled(False)
             else:
                 self._show_chat_panel()
         else:
             # Analysis still in progress — keep input locked
-            self.chat_input.setEnabled(False)
-            self.btn_send_chat.setEnabled(False)
+            self._set_chat_controls_enabled(False)
 
     def _populate_graph_from_entry(self, entry: _SessionEntry) -> None:
         pending = {

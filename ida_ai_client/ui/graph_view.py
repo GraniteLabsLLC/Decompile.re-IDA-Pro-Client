@@ -1410,8 +1410,11 @@ class FunctionGraphView(QtWidgets.QGraphicsView):
         }
         self._layout_starts = starts
         self._layout_targets = targets
+        # A spawned node already pops at its final position. Moving the whole
+        # graph at the same time adds a costly second animation.
         should_animate = (
-            self.isVisible()
+            not spawn_eas
+            and self.isVisible()
             and len(targets) > 1
             and any(
                 (starts[ea] - target).manhattanLength() > 0.5

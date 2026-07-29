@@ -204,7 +204,7 @@ class AnalysisWorker(QThread):
                 rename_style         = g_settings.get("rename_style", "snake_case"),
                 struct_member_style  = g_settings.get("struct_member_style", "default"),
                 skip_reversing       = False,
-                max_call_depth       = g_settings.get("max_call_depth", 2),
+                max_call_depth       = g_settings.get("max_call_depth", 0),
                 decompiler           = "ida",
             )
         except AuthError as e:

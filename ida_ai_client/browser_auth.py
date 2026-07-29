@@ -11,14 +11,14 @@ from __future__ import annotations
 import html
 import base64
 import hashlib
-import json
 import secrets
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import requests
 
 from .config import ACTIVE_API_URL, ACTIVE_DASHBOARD_URL, CLIENT_USER_AGENT
 from . import device_identity
@@ -104,22 +104,26 @@ def _exchange_auth_code(auth_code: str, state: str, code_verifier: str) -> dict:
             ACTIVE_API_URL, auth_code, state, code_verifier
         )
     )
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{ACTIVE_API_URL}/auth/client-codes/exchange",
-        data=body,
-        headers={
-            "content-type": "application/json",
-            "accept": "application/json",
-            "user-agent": CLIENT_USER_AGENT,
-        },
-        method="POST",
-    )
     try:
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        with opener.open(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+        response = requests.post(
+            f"{ACTIVE_API_URL}/auth/client-codes/exchange",
+            json=payload,
+            headers={
+                "accept": "application/json",
+                "user-agent": CLIENT_USER_AGENT,
+            },
+            timeout=15,
+            allow_redirects=False,
+            verify=True,
+        )
+        if not 200 <= response.status_code < 300:
+            raise BrowserAuthError(
+                f"Sign-in exchange returned HTTP {response.status_code}."
+            )
+        data = response.json()
+    except BrowserAuthError:
+        raise
+    except (requests.RequestException, ValueError) as e:
         raise BrowserAuthError(f"Could not exchange browser sign-in code: {e}") from e
 
     token = str(data.get("refresh_token", "") or "")
@@ -149,11 +153,6 @@ def _auth_url(
         "client": "ida_pro",
     })
     return f"{dashboard_url.rstrip('/')}/client-auth?{params}"
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 def _origin(url: str) -> str:
@@ -209,7 +208,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
 
         origin = self.headers.get("origin", "")
-        if origin != self.server.expected_origin:
+        if origin not in {self.server.expected_origin, "null"}:
             self._send_error(403, "Invalid callback origin.")
             return
 
