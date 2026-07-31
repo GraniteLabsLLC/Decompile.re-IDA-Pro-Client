@@ -251,11 +251,19 @@ def main_qss() -> str:
     QDialog {{
         background: {c['bg_elev']};
     }}
+    QDialog#analysisDialog {{
+        background: transparent;
+    }}
 
     /* ── Root surface ──────────────────────────────────────────────────── */
     QFrame#rootSurface {{
         background: {c['bg_elev']};
+        border-radius: {r}px;
         border: 1px solid {c['border_hi']};
+    }}
+    QFrame#analysisRootSurface {{
+        background: transparent;
+        border: none;
         border-radius: {r}px;
     }}
 

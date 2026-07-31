@@ -13,8 +13,11 @@ import subprocess
 import tempfile
 
 import idc
+import idaapi
+import ida_funcs
 import ida_hexrays
 import ida_lines
+import idautils
 
 from .ida.navigation import get_function_code, get_pseudocode, get_disassembly, get_function_name, find_function_by_name, get_bytes, get_function_global_references, build_call_tree, scan_exports, find_string_xrefs, pdb_symbols_loaded
 from .ida.renaming   import (
@@ -199,16 +202,16 @@ def _get_data_batch(cmd: dict) -> dict:
         ea = _parse_ea(ea_text)
         if ea is None and target.lower().startswith("0x"):
             ea = _parse_ea(target)
-        if ea is None and size > 0:
-            lookup_name = name or target
-            if lookup_name:
-                named_ea = idc.get_name_ea_simple(lookup_name)
-                if named_ea != idc.BADADDR:
-                    ea = named_ea
+        lookup_name = name or target
+        if ea is None and lookup_name:
+            named_ea = idc.get_name_ea_simple(lookup_name)
+            if named_ea != idc.BADADDR:
+                ea = int(named_ea)
+        if ea is not None:
+            result["address"] = hex(ea)
 
         if size > 0 and ea is not None:
             result["kind"] = "memory"
-            result["address"] = hex(ea)
             raw = get_bytes(ea, size)
             if raw:
                 result["hex"] = raw.hex()
@@ -240,6 +243,369 @@ def _get_data_batch(cmd: dict) -> dict:
         results.append(result)
 
     return {"type": "data_batch_result", "data_results": results}
+
+
+def _resolve_function_query(query: str):
+    query = (query or "").strip()
+    if not query:
+        return None
+    ea = _parse_ea(query) if query.lower().startswith("0x") else None
+    if ea is None:
+        ea = find_function_by_name(query)
+    if ea is None:
+        return None
+    func = ida_funcs.get_func(ea)
+    return int(func.start_ea) if func is not None else None
+
+
+def _resolve_functions(cmd: dict) -> dict:
+    """Resolve ordered function names without decompiling their bodies."""
+    raw_names = cmd.get("names", [])
+    if not isinstance(raw_names, list):
+        return {
+            "type": "function_resolutions_result",
+            "error": "names must be a list",
+        }
+    if len(raw_names) > 4096:
+        return {
+            "type": "function_resolutions_result",
+            "error": "too many function names",
+        }
+
+    results = []
+    for raw_name in raw_names:
+        query = str(raw_name or "").strip()
+        result = {"query": query}
+        if not query:
+            result["error"] = "function name is empty"
+        else:
+            ea = _resolve_function_query(query)
+            if ea is None:
+                result["error"] = "function not found"
+            else:
+                result["address"] = hex(ea)
+                result["name"] = get_function_name(ea)
+        results.append(result)
+    return {
+        "type": "function_resolutions_result",
+        "function_resolutions": results,
+    }
+
+
+def _get_pseudocodes(cmd: dict) -> dict:
+    results = []
+    for query in cmd.get("names", []) or []:
+        query = str(query or "").strip()
+        result = {"query": query}
+        ea = _resolve_function_query(query)
+        if ea is None:
+            result["error"] = "function not found"
+        else:
+            result["address"] = hex(ea)
+            result["name"] = get_function_name(ea)
+            code = get_function_code(ea) or ""
+            if code:
+                result["pseudocode"] = code
+            else:
+                result["error"] = "pseudocode unavailable"
+        results.append(result)
+    return {"type": "pseudocodes_result", "pseudocodes": results}
+
+
+_MAX_ANSWER_SEARCH_QUERIES = 16
+_MAX_ANSWER_SEARCH_RESULTS = 50
+_MAX_STRING_SEARCH_PREVIEW = 512
+_MAX_TYPE_DECLARATION_PREVIEW = 4096
+
+
+def _bounded_search_request(cmd: dict, result_type: str):
+    raw_queries = cmd.get("queries", [])
+    if not isinstance(raw_queries, list):
+        return None, None, {
+            "type": result_type,
+            "error": "queries must be a list",
+        }
+
+    queries = []
+    seen_queries = set()
+    for raw_query in raw_queries:
+        query = str(raw_query or "").strip().casefold()
+        if not query or query in seen_queries:
+            continue
+        seen_queries.add(query)
+        queries.append(query)
+    if not queries:
+        return None, None, {
+            "type": result_type,
+            "error": "at least one non-empty query is required",
+        }
+    if len(queries) > _MAX_ANSWER_SEARCH_QUERIES:
+        return None, None, {
+            "type": result_type,
+            "error": (
+                f"at most {_MAX_ANSWER_SEARCH_QUERIES} queries are allowed"
+            ),
+        }
+
+    try:
+        limit = int(cmd.get("limit", 0))
+    except (TypeError, ValueError):
+        limit = 0
+    if not 1 <= limit <= _MAX_ANSWER_SEARCH_RESULTS:
+        return None, None, {
+            "type": result_type,
+            "error": (
+                "limit must be between 1 and "
+                f"{_MAX_ANSWER_SEARCH_RESULTS}"
+            ),
+        }
+    return queries, limit, None
+
+
+def _best_search_score(value: str, queries):
+    folded_value = value.casefold()
+    scores = []
+    for query in queries:
+        position = folded_value.find(query)
+        if position < 0:
+            continue
+        if folded_value == query:
+            rank = 0
+        elif position == 0:
+            rank = 1
+        else:
+            rank = 2
+        scores.append((rank, position, len(folded_value)))
+    return (min(scores), folded_value) if scores else None
+
+
+def _search_strings(cmd: dict) -> dict:
+    queries, limit, error = _bounded_search_request(
+        cmd,
+        "string_search_result",
+    )
+    if error is not None:
+        return error
+
+    matches = []
+    for item in idautils.Strings():
+        try:
+            address = int(item.ea)
+            value = str(item)
+        except Exception:
+            continue
+        scored = _best_search_score(value, queries)
+        if scored is not None:
+            score, folded_value = scored
+            matches.append((score, folded_value, address, value))
+
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    strings = []
+    for score, _folded_value, address, value in matches[:limit]:
+        preview_offset = 0
+        if len(value) > _MAX_STRING_SEARCH_PREVIEW:
+            preview_offset = max(0, score[1] - 128)
+            preview_offset = min(
+                preview_offset,
+                len(value) - _MAX_STRING_SEARCH_PREVIEW,
+            )
+        preview = value[
+            preview_offset:preview_offset + _MAX_STRING_SEARCH_PREVIEW
+        ]
+        strings.append({
+            "address": hex(address),
+            "value": preview,
+            "length": len(value),
+            "preview_offset": preview_offset,
+            "truncated": len(preview) != len(value),
+        })
+    return {"type": "string_search_result", "strings": strings}
+
+
+def _search_global_names(cmd: dict) -> dict:
+    queries, limit, error = _bounded_search_request(
+        cmd,
+        "global_name_search_result",
+    )
+    if error is not None:
+        return error
+
+    matches = []
+    for ea, name in idautils.Names():
+        name = str(name or "")
+        scored = _best_search_score(name, queries)
+        if scored is not None:
+            score, folded_name = scored
+            matches.append((score, folded_name, int(ea), name))
+
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    names = [
+        {"address": hex(ea), "name": name}
+        for _score, _folded_name, ea, name in matches[:limit]
+    ]
+    return {"type": "global_name_search_result", "names": names}
+
+
+def _resolve_named_address(target: str):
+    target = (target or "").strip()
+    if not target:
+        return None
+    if target.lower().startswith("0x"):
+        return _parse_ea(target)
+    ea = idc.get_name_ea_simple(target)
+    return None if ea == idaapi.BADADDR else int(ea)
+
+
+def _get_xrefs(cmd: dict) -> dict:
+    targets = []
+    for target in cmd.get("targets", []) or []:
+        target = str(target or "").strip()
+        result = {"target": target}
+        ea = _resolve_named_address(target)
+        if ea is None:
+            result["error"] = "address or name not found"
+            targets.append(result)
+            continue
+
+        result["address"] = hex(ea)
+        grouped = {}
+        for xref in idautils.XrefsTo(ea, 0):
+            func = ida_funcs.get_func(xref.frm)
+            if func is None:
+                continue
+            func_ea = int(func.start_ea)
+            grouped[func_ea] = grouped.get(func_ea, 0) + 1
+        result["references"] = [
+            {
+                "function_address": hex(func_ea),
+                "function_name": get_function_name(func_ea),
+                "count": count,
+            }
+            for func_ea, count in sorted(grouped.items())
+        ]
+        targets.append(result)
+    return {"type": "xrefs_result", "xrefs": targets}
+
+
+_DEFAULT_SUB_NAME = re.compile(r"^sub_[0-9A-Fa-f]+$")
+
+
+def _search_named_functions(cmd: dict) -> dict:
+    queries, limit, error = _bounded_search_request(
+        cmd,
+        "function_search_result",
+    )
+    if error is not None:
+        return error
+
+    matches = []
+    for ea in idautils.Functions():
+        name = get_function_name(ea)
+        if _DEFAULT_SUB_NAME.fullmatch(name or ""):
+            continue
+        name = str(name or "")
+        scored = _best_search_score(name, queries)
+        if scored is not None:
+            score, folded_name = scored
+            matches.append((score, folded_name, int(ea), name))
+
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    functions = []
+    for _score, _folded_name, ea, name in matches[:limit]:
+        reference_count = 0
+        for xref in idautils.XrefsTo(ea, 0):
+            if ida_funcs.get_func(xref.frm) is not None:
+                reference_count += 1
+        functions.append({
+            "address": hex(ea),
+            "name": name,
+            "reference_count": reference_count,
+        })
+    return {"type": "function_search_result", "functions": functions}
+
+
+def _search_types(cmd: dict) -> dict:
+    queries, limit, error = _bounded_search_request(
+        cmd,
+        "type_search_result",
+    )
+    if error is not None:
+        return error
+
+    matches = []
+    for ordinal, name in idautils.Types():
+        name = str(name or "")
+        scored = _best_search_score(name, queries)
+        if scored is not None:
+            score, folded_name = scored
+            matches.append((score, folded_name, int(ordinal), name))
+
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    types = []
+    for _score, _folded_name, ordinal, name in matches[:limit]:
+        item = {"ordinal": ordinal, "name": name}
+        try:
+            declaration = idc.get_local_type(
+                ordinal,
+                getattr(idc, "PRTYPE_1LINE", 0),
+            ) or ""
+            if declaration:
+                item["declaration"] = declaration[:_MAX_TYPE_DECLARATION_PREVIEW]
+                item["declaration_length"] = len(declaration)
+                item["declaration_truncated"] = (
+                    len(declaration) > _MAX_TYPE_DECLARATION_PREVIEW
+                )
+        except Exception:
+            pass
+        types.append(item)
+    return {"type": "type_search_result", "types": types}
+
+
+def _main_entrypoint():
+    getter = getattr(idaapi, "inf_get_start_ea", None)
+    if callable(getter):
+        return int(getter())
+    info_getter = getattr(idaapi, "get_inf_structure", None)
+    if callable(info_getter):
+        return int(info_getter().start_ea)
+    return None
+
+
+def _get_entrypoints(_cmd: dict) -> dict:
+    by_ea = {}
+    main_ea = _main_entrypoint()
+    if main_ea is not None and main_ea != idaapi.BADADDR:
+        func = ida_funcs.get_func(main_ea)
+        by_ea[main_ea] = {
+            "address": hex(main_ea),
+            "name": (
+                get_function_name(main_ea)
+                if func is not None
+                else (idc.get_name(main_ea) or "")
+            ),
+            "main": True,
+            "is_function": func is not None,
+        }
+    for _index, ordinal, ea, name in idautils.Entries():
+        ea = int(ea)
+        func = ida_funcs.get_func(ea)
+        item = by_ea.setdefault(ea, {
+            "address": hex(ea),
+            "name": str(
+                name
+                or (
+                    get_function_name(ea)
+                    if func is not None
+                    else (idc.get_name(ea) or "")
+                )
+            ),
+            "is_function": func is not None,
+        })
+        item["ordinal"] = int(ordinal or 0)
+    return {
+        "type": "entrypoints_result",
+        "entrypoints": [by_ea[ea] for ea in sorted(by_ea)],
+    }
 
 
 def _rename_function(cmd: dict) -> dict:
@@ -898,6 +1264,14 @@ _DISPATCH = {
     "get_bytes":                _get_bytes,
     "get_value_from_name":      _get_value_from_name,
     "get_data_batch":           _get_data_batch,
+    "resolve_functions":        _resolve_functions,
+    "get_pseudocodes":          _get_pseudocodes,
+    "search_strings":           _search_strings,
+    "search_global_names":      _search_global_names,
+    "get_xrefs":                _get_xrefs,
+    "search_named_functions":   _search_named_functions,
+    "search_types":             _search_types,
+    "get_entrypoints":          _get_entrypoints,
     "rename_function":          _rename_function,
     "rename_lvar":              _rename_lvar,
     "rename_lvars":             _rename_lvars,

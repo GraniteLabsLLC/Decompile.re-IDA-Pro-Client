@@ -462,6 +462,7 @@ class ServerSession:
         skip_reversing: bool,
         max_call_depth: int,
         decompiler: str = "ida",
+        current_view: dict | None = None,
     ) -> str:
         """Start a new analysis session. Returns the session ID.
 
@@ -482,6 +483,8 @@ class ServerSession:
             "decompiler":           decompiler,
             "protocol_version":     1,
         }
+        if current_view:
+            body["current_view"] = dict(current_view)
         resp = self._request(
             "POST",
             f"{self.server_url}/session",
@@ -738,7 +741,7 @@ class ServerSession:
             )
         return statuses
 
-    def send_chat(self, message: str) -> None:
+    def send_chat(self, message: str, current_view: dict | None = None) -> None:
         """Send a follow-up chat message to an active (post-analysis) session.
 
         The server queues the message and delivers the response asynchronously
@@ -754,7 +757,10 @@ class ServerSession:
             resp = self._request(
                 "POST",
                 f"{self.server_url}/session/{session_id}/chat",
-                json={"message": message},
+                json={
+                    "message": message,
+                    "current_view": dict(current_view) if current_view else None,
+                },
                 timeout=10,
                 headers=self._auth_headers(),
                 allow_redirects=False,

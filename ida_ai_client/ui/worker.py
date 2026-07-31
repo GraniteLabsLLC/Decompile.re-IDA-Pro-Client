@@ -148,6 +148,7 @@ class AnalysisWorker(QThread):
     # PySide6 Signal(int) maps to C++ 32-bit int — too small for 64-bit EAs.
     # Use object so Python ints are passed through unsized.
     sig_tree_node_added   = Signal(object, object, str, bool)     # parent_ea, ea, name, duplicate
+    sig_tree_nodes_added  = Signal(object)                        # parsed node tuples
     sig_tree_node_updated = Signal(object, str, str, str, str)    # ea, name, status, notes, summary
     sig_chat_response     = Signal(str)                     # message from server chat response
     sig_stream_start      = Signal()                        # response generation started
@@ -158,15 +159,24 @@ class AnalysisWorker(QThread):
     sig_agent_thinking_start = Signal()                     # report agent began gathering
     sig_agent_turn_start = Signal(int)                       # final-agent turn began
     sig_agent_turn_note = Signal(int, str)                    # visible note from a tool-agent turn
+    sig_agent_turn_chunk = Signal(int, str)                   # live visible content from a tool-agent turn
     sig_agent_turn_end = Signal(int, str)                    # final-agent turn ended
     sig_agent_reading = Signal(object)                       # evidence read by final agent
+    sig_answer_audit = Signal(object)                        # draft audit lifecycle update
     sig_reversal_activity = Signal(object)                   # structured reversal-stage activity
 
-    def __init__(self, root_ea: int, user_prompt: str, model_tier: str = "fast"):
+    def __init__(
+        self,
+        root_ea: int,
+        user_prompt: str,
+        model_tier: str = "fast",
+        current_view: dict | None = None,
+    ):
         super().__init__()
         self.root_ea     = root_ea
         self.user_prompt = user_prompt
         self.model_tier  = model_tier or "fast"
+        self.current_view = dict(current_view or {})
         self._cancelled  = False
         self._srv: ServerSession | None = None
         self._result_cache: dict[str, dict] = {}
@@ -206,6 +216,7 @@ class AnalysisWorker(QThread):
                 skip_reversing       = False,
                 max_call_depth       = g_settings.get("max_call_depth", 0),
                 decompiler           = "ida",
+                current_view         = self.current_view,
             )
         except AuthError as e:
             self.sig_error.emit(_reauth_message(str(e)))
@@ -330,6 +341,26 @@ class AnalysisWorker(QThread):
             )
             return True
 
+        if cmd_type == "tree_nodes_added":
+            raw_nodes = cmd.get("tree_nodes", [])
+            if not isinstance(raw_nodes, list):
+                raise ValueError("tree_nodes_added requires a node list")
+            nodes = []
+            for node in raw_nodes:
+                if not isinstance(node, dict):
+                    raise ValueError("tree_nodes_added contains an invalid node")
+                parent_ea = self._parse_ea(node.get("parent_ea", "0x0"))
+                ea = self._parse_ea(node.get("ea", "0x0"))
+                name = node.get("name", "")
+                if not ea or not isinstance(name, str):
+                    raise ValueError("tree_nodes_added contains an invalid node")
+                nodes.append(
+                    (parent_ea, ea, name, bool(node.get("duplicate", False)))
+                )
+            if nodes:
+                self.sig_tree_nodes_added.emit(nodes)
+            return True
+
         if cmd_type == "tree_node_updated":
             self.sig_tree_node_updated.emit(
                 self._parse_ea(cmd.get("ea", "0x0")),
@@ -398,6 +429,21 @@ class AnalysisWorker(QThread):
             self.sig_answer_preparing.emit()
             return True
 
+        if cmd_type in {
+            "answer_audit_start",
+            "answer_audit_running",
+            "answer_audit_skipped",
+            "answer_audit_complete",
+            "answer_audit_failed",
+        }:
+            self.sig_answer_audit.emit({
+                "type": cmd_type,
+                "status": str(cmd.get("status", "") or "")[:64],
+                "report": str(cmd.get("report", "") or ""),
+                "edit_count": max(0, int(cmd.get("edit_count", 0) or 0)),
+            })
+            return True
+
         if cmd_type == "agent_turn_start":
             self.sig_agent_turn_start.emit(int(cmd.get("turn", 0) or 0))
             return True
@@ -410,9 +456,10 @@ class AnalysisWorker(QThread):
             return True
 
         if cmd_type == "agent_turn_chunk":
-            # Agent investigation text is intentionally not forwarded to the
-            # chat UI. Keep accepting the command for compatibility with an
-            # older server's in-flight event stream.
+            self.sig_agent_turn_chunk.emit(
+                int(cmd.get("turn", 0) or 0),
+                str(cmd.get("delta", "") or ""),
+            )
             return True
 
         if cmd_type == "agent_turn_end":
@@ -552,7 +599,7 @@ class AnalysisWorker(QThread):
 
         return False
 
-    def send_chat(self, message: str) -> None:
+    def send_chat(self, message: str, current_view: dict | None = None) -> None:
         """Forward a follow-up chat message to the server.
 
         Called from a dedicated chat worker while this QThread runs the poll
@@ -560,7 +607,7 @@ class AnalysisWorker(QThread):
         other requests.
         """
         if self._srv:
-            self._srv.send_chat(message)
+            self._srv.send_chat(message, current_view=current_view)
 
     def _sleep_interruptible(self, seconds: int) -> bool:
         """Sleep for up to `seconds`, in 0.25s ticks, honouring cancellation.

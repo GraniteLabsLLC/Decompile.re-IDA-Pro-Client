@@ -32,6 +32,19 @@ def get_current_function_ea() -> int | None:
     return func.start_ea if func else None
 
 
+def get_current_view() -> dict:
+    """Snapshot the address and containing function currently visible in IDA."""
+    ea = idc.get_screen_ea()
+    if ea in (None, idaapi.BADADDR):
+        return {"address": ""}
+    view = {"address": hex(int(ea))}
+    func = ida_funcs.get_func(ea)
+    if func is not None:
+        view["function_address"] = hex(int(func.start_ea))
+        view["function_name"] = get_function_name(func.start_ea)
+    return view
+
+
 def get_function_name(ea: int) -> str:
     name = idc.get_func_name(ea)
     return name if name else f"sub_{ea:X}"
