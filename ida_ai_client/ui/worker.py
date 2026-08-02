@@ -159,6 +159,7 @@ class AnalysisWorker(QThread):
     sig_agent_thinking_start = Signal()                     # report agent began gathering
     sig_agent_turn_start = Signal(int)                       # final-agent turn began
     sig_agent_turn_note = Signal(int, str)                    # visible note from a tool-agent turn
+    sig_agent_reversal_note = Signal(int, str)                # tool-turn note moved into reversal activity
     sig_agent_turn_chunk = Signal(int, str)                   # live visible content from a tool-agent turn
     sig_agent_turn_end = Signal(int, str)                    # final-agent turn ended
     sig_agent_reading = Signal(object)                       # evidence read by final agent
@@ -450,6 +451,13 @@ class AnalysisWorker(QThread):
 
         if cmd_type == "agent_turn_note":
             self.sig_agent_turn_note.emit(
+                int(cmd.get("turn", 0) or 0),
+                cmd.get("agent_note", ""),
+            )
+            return True
+
+        if cmd_type == "agent_reversal_note":
+            self.sig_agent_reversal_note.emit(
                 int(cmd.get("turn", 0) or 0),
                 cmd.get("agent_note", ""),
             )

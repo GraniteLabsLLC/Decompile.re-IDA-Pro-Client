@@ -7,7 +7,7 @@ import os
 from urllib.parse import urlparse
 
 PLUGIN_NAME    = "Decompile.re"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 PLUGIN_HOTKEY  = "Ctrl-Shift-A"
 CLIENT_USER_AGENT = f"decompile-re-ida/{PLUGIN_VERSION}"
 

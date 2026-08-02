@@ -64,7 +64,7 @@ _ARCHIVE_LIMIT = 64 * 1024 * 1024
 _EXTRACTED_LIMIT = 128 * 1024 * 1024
 _FILE_LIMIT = 4096
 _REDIRECT_LIMIT = 5
-_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
+UPDATE_CHECK_INTERVAL_SECONDS = 10 * 60
 _STATE_PATH = Path(SETTINGS_DIR) / "update-state.json"
 _JOURNAL_NAME = ".decompile-re-update-journal.json"
 _BACKUP_DIRECTORY = ".decompile-re-backups"
@@ -594,7 +594,7 @@ def _cached_update(force: bool) -> UpdateInfo | None | object:
     latest = state.get("latest_version")
     if (
         isinstance(checked_at, int)
-        and time.time() - checked_at < _CHECK_INTERVAL_SECONDS
+        and time.time() - checked_at < UPDATE_CHECK_INTERVAL_SECONDS
         and isinstance(latest, str)
     ):
         try:

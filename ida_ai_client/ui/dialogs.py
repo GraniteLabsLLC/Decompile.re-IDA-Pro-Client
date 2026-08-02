@@ -2011,6 +2011,17 @@ class _AgentTurnWidget(QtWidgets.QWidget):
             return
         self._add_note_label(note)
 
+    def clear_notes(self) -> None:
+        for label in self._notes:
+            self._layout.removeWidget(label)
+            label.setParent(None)
+            label.deleteLater()
+        self._notes.clear()
+        self._streaming_note = None
+        self._streaming_text = ""
+        self._layout.invalidate()
+        self.updateGeometry()
+
     def append_chunk(self, delta: str) -> None:
         delta = str(delta or "")
         if not delta:
@@ -3081,6 +3092,20 @@ class WorkingLogPane(QtWidgets.QWidget):
         if not note:
             return
         self._ensure_turn(turn).append_note(note)
+        self.set_expanded(True)
+        self._content_changed()
+
+    def move_agent_note_to_reversal(self, turn: int, note: str) -> None:
+        note = str(note or "").strip()
+        if not note:
+            return
+        widget = self._turns.get(int(turn))
+        if widget is not None:
+            widget.clear_notes()
+        self.queue_reversal_activity({
+            "action": "agent_reversal_note",
+            "label": note,
+        })
         self.set_expanded(True)
         self._content_changed()
 
@@ -5377,6 +5402,12 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self._usage_refresh_timer.setInterval(30_000)
         self._usage_refresh_timer.timeout.connect(self._refresh_usage)
         self._usage_refresh_timer.start()
+        self._update_check_timer = QtCore.QTimer(self)
+        self._update_check_timer.setInterval(
+            updater.UPDATE_CHECK_INTERVAL_SECONDS * 1000
+        )
+        self._update_check_timer.timeout.connect(self._start_update_check)
+        self._update_check_timer.start()
         self._refresh_target()
         self._refresh_auth_profile()
         self._verify_saved_sign_in()
@@ -6268,6 +6299,11 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             self._current_log_pane.append_agent_note(turn, note)
             self._schedule_scroll_to_bottom()
 
+    def _on_agent_reversal_note(self, turn: int, note: str) -> None:
+        if self._current_log_pane:
+            self._current_log_pane.move_agent_note_to_reversal(turn, note)
+            self._schedule_scroll_to_bottom()
+
     def _on_agent_turn_chunk(self, turn: int, delta: str) -> None:
         if self._current_log_pane:
             self._current_log_pane.append_agent_chunk(turn, delta)
@@ -6686,6 +6722,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         worker.sig_agent_thinking_start.connect(self._on_agent_thinking_start)
         worker.sig_agent_turn_start.connect(self._on_agent_turn_start)
         worker.sig_agent_turn_note.connect(self._on_agent_turn_note)
+        worker.sig_agent_reversal_note.connect(self._on_agent_reversal_note)
         worker.sig_agent_turn_chunk.connect(self._on_agent_turn_chunk)
         worker.sig_agent_turn_end.connect(self._on_agent_turn_end)
         worker.sig_agent_reading.connect(self._on_agent_reading)
@@ -6709,6 +6746,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             (worker.sig_agent_thinking_start, self._on_agent_thinking_start),
             (worker.sig_agent_turn_start, self._on_agent_turn_start),
             (worker.sig_agent_turn_note, self._on_agent_turn_note),
+            (worker.sig_agent_reversal_note, self._on_agent_reversal_note),
             (worker.sig_agent_turn_chunk, self._on_agent_turn_chunk),
             (worker.sig_agent_turn_end, self._on_agent_turn_end),
             (worker.sig_agent_reading, self._on_agent_reading),
