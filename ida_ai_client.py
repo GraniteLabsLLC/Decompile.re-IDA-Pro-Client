@@ -58,7 +58,10 @@ def _recover_interrupted_update() -> None:
         target_entry = root / "ida_ai_client.py"
         target_marker = root / "decompile-re-install.json"
         staging = root / f".decompile-re-staging-{operation_id}"
-        backup = root / ".decompile-re-backups" / operation_id
+        rollback = root / f".decompile-re-rollback-{operation_id}"
+        legacy_backups = root / ".decompile-re-backups"
+        if not rollback.is_dir():
+            rollback = legacy_backups / operation_id
 
         if (
             journal.get("state") == "activated"
@@ -82,9 +85,9 @@ def _recover_interrupted_update() -> None:
             if journal.get("health_check_process") == process_identity:
                 return
 
-        backup_module = backup / "ida_ai_client"
-        backup_entry = backup / "ida_ai_client.py"
-        backup_marker = backup / "decompile-re-install.json"
+        backup_module = rollback / "ida_ai_client"
+        backup_entry = rollback / "ida_ai_client.py"
+        backup_marker = rollback / "decompile-re-install.json"
         if backup_module.is_dir():
             if target_module.exists():
                 shutil.rmtree(target_module)
@@ -95,6 +98,8 @@ def _recover_interrupted_update() -> None:
             os.replace(backup_marker, target_marker)
         elif journal.get("had_marker") is False:
             target_marker.unlink(missing_ok=True)
+        shutil.rmtree(rollback, ignore_errors=True)
+        shutil.rmtree(legacy_backups, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
         journal_path.unlink(missing_ok=True)
     except Exception as exc:
@@ -104,8 +109,12 @@ def _recover_interrupted_update() -> None:
 def _mark_update_healthy() -> None:
     root = Path(__file__).resolve().parent
     journal_path = root / ".decompile-re-update-journal.json"
+    legacy_backups = root / ".decompile-re-backups"
     try:
-        if not journal_path.is_file() or journal_path.stat().st_size > 64 * 1024:
+        if not journal_path.is_file():
+            shutil.rmtree(legacy_backups, ignore_errors=True)
+            return
+        if journal_path.stat().st_size > 64 * 1024:
             return
         journal = json.loads(journal_path.read_text("utf-8"))
         if (
@@ -116,6 +125,13 @@ def _mark_update_healthy() -> None:
             and journal.get("health_check_process")
             == _update_process_identity()
         ):
+            operation_id = str(journal.get("operation_id") or "")
+            if re.fullmatch(r"[0-9a-f]{32}", operation_id):
+                shutil.rmtree(
+                    root / f".decompile-re-rollback-{operation_id}",
+                    ignore_errors=True,
+                )
+            shutil.rmtree(legacy_backups, ignore_errors=True)
             journal_path.unlink()
     except Exception as exc:
         print(f"[Decompile.re] Could not finalize client update: {exc}")

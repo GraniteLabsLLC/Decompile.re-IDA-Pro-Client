@@ -7,7 +7,7 @@ import os
 from urllib.parse import urlparse
 
 PLUGIN_NAME    = "Decompile.re"
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.1.2"
 PLUGIN_HOTKEY  = "Ctrl-Shift-A"
 CLIENT_USER_AGENT = f"decompile-re-ida/{PLUGIN_VERSION}"
 
@@ -117,6 +117,7 @@ DEFAULT_SETTINGS: dict = {
     "rename_style":         "snake_case",
     "struct_member_style":  "default",
     "max_call_depth":       0,
+    "guess_virtual_function_calls": False,
     # Auth + user preferences. The refresh token is stored only in the OS
     # credential store via secret_store.py, never in this JSON settings file.
     "user_email":           "",
@@ -126,9 +127,10 @@ DEFAULT_SETTINGS: dict = {
     "active_account_id":    "",
     "accounts":             {},
     "model_tier":           "fast",
+    "agent_reasoning_level": "high",
     "device_id":            "",
     # UI colour theme — one of styles.PALETTES (see ui/styles.py).
-    "theme":                "Nord",
+    "theme":                "Tokyo Night",
 }
 
 g_settings: dict = dict(DEFAULT_SETTINGS)

@@ -14,6 +14,7 @@ from .config import (
 )
 
 _MODEL_TIERS = {"fast", "dynamic", "smart"}
+_AGENT_REASONING_LEVELS = {"low", "medium", "high", "extra_high"}
 _RENAME_STYLES = {"snake_case", "camelCase", "PascalCase"}
 _STRUCT_MEMBER_STYLES = {"default", "m_prefix", "typed_m_prefix"}
 _SECRET_KEYS = {"refresh_token"}
@@ -44,6 +45,14 @@ def _validated_settings(saved: object) -> dict:
 
     if validated.get("model_tier", DEFAULT_SETTINGS["model_tier"]) not in _MODEL_TIERS:
         validated["model_tier"] = DEFAULT_SETTINGS["model_tier"]
+    if (
+        validated.get(
+            "agent_reasoning_level",
+            DEFAULT_SETTINGS["agent_reasoning_level"],
+        )
+        not in _AGENT_REASONING_LEVELS
+    ):
+        validated["agent_reasoning_level"] = DEFAULT_SETTINGS["agent_reasoning_level"]
     if validated.get("rename_style", DEFAULT_SETTINGS["rename_style"]) not in _RENAME_STYLES:
         validated["rename_style"] = DEFAULT_SETTINGS["rename_style"]
     if (

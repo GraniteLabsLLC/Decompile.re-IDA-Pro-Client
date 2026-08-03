@@ -67,7 +67,7 @@ _REDIRECT_LIMIT = 5
 UPDATE_CHECK_INTERVAL_SECONDS = 10 * 60
 _STATE_PATH = Path(SETTINGS_DIR) / "update-state.json"
 _JOURNAL_NAME = ".decompile-re-update-journal.json"
-_BACKUP_DIRECTORY = ".decompile-re-backups"
+_ROLLBACK_PREFIX = ".decompile-re-rollback-"
 _operation_lock = threading.RLock()
 _activated_version: str | None = None
 
@@ -123,7 +123,6 @@ class UpdateInfo:
 @dataclass(frozen=True)
 class InstallResult:
     version: str
-    backup_directory: str
 
 
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
@@ -840,14 +839,14 @@ def _rollback(root: Path, journal: dict) -> None:
     operation_id = str(journal.get("operation_id") or "")
     if not _OPERATION_ID_RE.fullmatch(operation_id):
         raise UpdateError("Update recovery journal is invalid")
-    backup = root / _BACKUP_DIRECTORY / operation_id
+    rollback = root / f"{_ROLLBACK_PREFIX}{operation_id}"
     staging = root / f".decompile-re-staging-{operation_id}"
     target_module = root / "ida_ai_client"
     target_entry = root / "ida_ai_client.py"
     target_marker = root / "decompile-re-install.json"
-    backup_module = backup / "ida_ai_client"
-    backup_entry = backup / "ida_ai_client.py"
-    backup_marker = backup / "decompile-re-install.json"
+    backup_module = rollback / "ida_ai_client"
+    backup_entry = rollback / "ida_ai_client.py"
+    backup_marker = rollback / "decompile-re-install.json"
 
     if backup_module.is_dir():
         if target_module.exists():
@@ -859,27 +858,15 @@ def _rollback(root: Path, journal: dict) -> None:
         os.replace(backup_marker, target_marker)
     elif journal.get("had_marker") is False:
         target_marker.unlink(missing_ok=True)
+    shutil.rmtree(rollback, ignore_errors=True)
     shutil.rmtree(staging, ignore_errors=True)
     _journal_path(root).unlink(missing_ok=True)
 
 
-def _prune_backups(root: Path, keep: int = 3) -> None:
-    backups = root / _BACKUP_DIRECTORY
-    if not backups.is_dir():
-        return
-    entries = sorted(
-        (path for path in backups.iterdir() if path.is_dir()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    for old in entries[keep:]:
-        shutil.rmtree(old, ignore_errors=True)
-
-
-def _activate_payload(root: Path, payload: Path, version: str, operation_id: str) -> str:
+def _activate_payload(root: Path, payload: Path, version: str, operation_id: str) -> None:
     staging = root / f".decompile-re-staging-{operation_id}"
-    backup = root / _BACKUP_DIRECTORY / operation_id
-    backup.mkdir(parents=True, exist_ok=False)
+    rollback = root / f"{_ROLLBACK_PREFIX}{operation_id}"
+    rollback.mkdir(parents=False, exist_ok=False)
     target_module = root / "ida_ai_client"
     target_entry = root / "ida_ai_client.py"
     target_marker = root / "decompile-re-install.json"
@@ -907,10 +894,10 @@ def _activate_payload(root: Path, payload: Path, version: str, operation_id: str
     _write_json_atomic(_journal_path(root), journal)
 
     try:
-        os.replace(target_module, backup / "ida_ai_client")
-        shutil.copy2(target_entry, backup / "ida_ai_client.py")
+        os.replace(target_module, rollback / "ida_ai_client")
+        shutil.copy2(target_entry, rollback / "ida_ai_client.py")
         if target_marker.is_file():
-            shutil.copy2(target_marker, backup / "decompile-re-install.json")
+            shutil.copy2(target_marker, rollback / "decompile-re-install.json")
 
         os.replace(staged_module, target_module)
         os.replace(staged_entry, target_entry)
@@ -919,8 +906,6 @@ def _activate_payload(root: Path, payload: Path, version: str, operation_id: str
         journal["health_check_started"] = False
         _write_json_atomic(_journal_path(root), journal)
         shutil.rmtree(staging, ignore_errors=True)
-        _prune_backups(root)
-        return str(backup)
     except Exception:
         _rollback(root, journal)
         raise
@@ -972,7 +957,7 @@ def install_latest(
                 )
             _validate_dependencies(payload)
             _check_cancelled(cancel_event)
-            backup = _activate_payload(
+            _activate_payload(
                 root,
                 payload,
                 manifest.version,
@@ -983,7 +968,12 @@ def install_latest(
             state["installed_at"] = int(time.time())
             _write_json_atomic(_STATE_PATH, state)
             _activated_version = manifest.version
-            return InstallResult(manifest.version, backup)
+            return InstallResult(manifest.version)
         finally:
             archive_path.unlink(missing_ok=True)
             shutil.rmtree(staging, ignore_errors=True)
+            if not _journal_path(root).is_file():
+                shutil.rmtree(
+                    root / f"{_ROLLBACK_PREFIX}{operation_id}",
+                    ignore_errors=True,
+                )

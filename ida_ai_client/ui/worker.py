@@ -151,6 +151,8 @@ class AnalysisWorker(QThread):
     sig_tree_nodes_added  = Signal(object)                        # parsed node tuples
     sig_tree_node_updated = Signal(object, str, str, str, str)    # ea, name, status, notes, summary
     sig_chat_response     = Signal(str)                     # message from server chat response
+    sig_operation_cancelled = Signal(str)                   # active agent/reversal operation stopped
+    sig_operation_interrupted = Signal(str)                 # active operation failed but chat remains available
     sig_stream_start      = Signal()                        # response generation started
     sig_stream_chunk      = Signal(str)                     # incremental response delta
     sig_candidate_answer_replace = Signal(int, str)         # full mutable answer replacement
@@ -171,18 +173,22 @@ class AnalysisWorker(QThread):
         root_ea: int,
         user_prompt: str,
         model_tier: str = "fast",
+        agent_reasoning_level: str = "high",
         current_view: dict | None = None,
     ):
         super().__init__()
         self.root_ea     = root_ea
         self.user_prompt = user_prompt
         self.model_tier  = model_tier or "fast"
+        self.agent_reasoning_level = agent_reasoning_level or "high"
         self.current_view = dict(current_view or {})
         self._cancelled  = False
         self._srv: ServerSession | None = None
         self._result_cache: dict[str, dict] = {}
         self._skip_batch_sequence_commit = False
         self._cancel_thread: threading.Thread | None = None
+        self._operation_cancel_thread: threading.Thread | None = None
+        self._operation_cancel_requested = False
 
     # ── QThread entry point ───────────────────────────────────────────────────
 
@@ -192,6 +198,8 @@ class AnalysisWorker(QThread):
         finally:
             if self._cancel_thread is not None:
                 self._cancel_thread.join(timeout=6)
+            if self._operation_cancel_thread is not None:
+                self._operation_cancel_thread.join(timeout=6)
             if self._srv is not None:
                 self._srv.close()
 
@@ -209,6 +217,7 @@ class AnalysisWorker(QThread):
                 root_ea              = self.root_ea,
                 user_prompt          = self.user_prompt,
                 model_tier           = self.model_tier,
+                agent_reasoning_level = self.agent_reasoning_level,
                 auto_renames         = g_settings.get("auto_renames", True),
                 auto_types           = g_settings.get("auto_types", True),
                 auto_structs         = g_settings.get("auto_structs", True),
@@ -216,6 +225,9 @@ class AnalysisWorker(QThread):
                 struct_member_style  = g_settings.get("struct_member_style", "default"),
                 skip_reversing       = False,
                 max_call_depth       = g_settings.get("max_call_depth", 0),
+                guess_virtual_function_calls = g_settings.get(
+                    "guess_virtual_function_calls", False
+                ),
                 decompiler           = "ida",
                 current_view         = self.current_view,
             )
@@ -237,6 +249,8 @@ class AnalysisWorker(QThread):
         if self._cancelled:
             self._srv.cancel()
             return
+        if self._operation_cancel_requested:
+            self._start_operation_cancel_request()
         self._poll_loop()
 
     def _poll_loop(self) -> None:
@@ -320,6 +334,23 @@ class AnalysisWorker(QThread):
         if cmd_type == "error":
             self.sig_error.emit(cmd.get("message", "Unknown server error"))
             return False
+
+        if cmd_type == "operation_cancelled":
+            self._operation_cancel_requested = False
+            self.sig_operation_cancelled.emit(
+                cmd.get("message", "Generation stopped.")
+            )
+            return True
+
+        if cmd_type == "operation_interrupted":
+            self._operation_cancel_requested = False
+            self.sig_operation_interrupted.emit(
+                cmd.get(
+                    "message",
+                    "Generation was interrupted. You can send another message to continue.",
+                )
+            )
+            return True
 
         # ── UI notifications (no result needed) ───────────────────────────
         if cmd_type == "wait":
@@ -607,7 +638,13 @@ class AnalysisWorker(QThread):
 
         return False
 
-    def send_chat(self, message: str, current_view: dict | None = None) -> None:
+    def send_chat(
+        self,
+        message: str,
+        current_view: dict | None = None,
+        model_tier: str = "fast",
+        agent_reasoning_level: str = "high",
+    ) -> None:
         """Forward a follow-up chat message to the server.
 
         Called from a dedicated chat worker while this QThread runs the poll
@@ -615,7 +652,12 @@ class AnalysisWorker(QThread):
         other requests.
         """
         if self._srv:
-            self._srv.send_chat(message, current_view=current_view)
+            self._srv.send_chat(
+                message,
+                current_view=current_view,
+                model_tier=model_tier,
+                agent_reasoning_level=agent_reasoning_level,
+            )
 
     def _sleep_interruptible(self, seconds: int) -> bool:
         """Sleep for up to `seconds`, in 0.25s ticks, honouring cancellation.
@@ -660,6 +702,25 @@ class AnalysisWorker(QThread):
                 daemon=True,
             )
             self._cancel_thread.start()
+
+    def cancel_operation(self) -> None:
+        """Stop current server work while keeping this session's poller alive."""
+        self._operation_cancel_requested = True
+        self._start_operation_cancel_request()
+
+    def _start_operation_cancel_request(self) -> None:
+        session = self._srv
+        if session is None:
+            return
+        thread = self._operation_cancel_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._operation_cancel_thread = threading.Thread(
+            target=session.cancel_operation,
+            name="ida-ai-cancel-operation",
+            daemon=True,
+        )
+        self._operation_cancel_thread.start()
 
     def delete_history(self) -> None:
         if self._srv:

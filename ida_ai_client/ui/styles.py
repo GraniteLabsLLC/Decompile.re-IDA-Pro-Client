@@ -97,7 +97,7 @@ PALETTES: dict[str, dict] = {
     },
 }
 
-DEFAULT_THEME = "Nord"
+DEFAULT_THEME = "Tokyo Night"
 
 # ── Live design tokens (mutated in place by apply_theme) ──────────────────────
 
@@ -173,69 +173,6 @@ def _qss_rgba(hex_color: str, alpha: float) -> str:
         b = int(value[5:7], 16)
         return f"rgba({r}, {g}, {b}, {alpha:.3f})"
     return value
-
-
-# ── Scrollbar ────────────────────────────────────────────────────────────────
-
-def scrollbar_qss(scope: str) -> str:
-    """Complete vertical-scrollbar styling for a QAbstractScrollArea descendant.
-
-    `scope` is the parent selector, e.g. ``"QScrollArea#chatScroll"`` or
-    ``"QTextEdit#chatHistory"``.  The rules MUST be emitted inside an
-    ancestor's stylesheet (i.e. main_qss) — a sheet set directly on the bare
-    scrollbar widget leaves the draggable handle unrendered, which is the bug
-    that made the thumb invisible.
-
-    Design:
-      • thin rounded track (faint, theme-tinted) so the full scroll range reads
-      • a clearly visible thumb (the "progress indicator") in a mid foreground
-        tone that contrasts on every palette, brightening on hover and turning
-        the accent colour while dragged
-      • EVERY subcontrol (arrows, line buttons, pages, groove) is explicitly
-        zeroed / cleared so no native placeholder can paint over the thumb
-
-    Colours come from the live COLORS dict, so the bar re-themes automatically
-    whenever main_qss() is re-applied on a theme switch.
-    """
-    c = COLORS
-    return f"""
-    {scope} QScrollBar:vertical {{
-        background: {c['bg_card']};
-        width: 9px;
-        margin: 0;
-        border: none;
-    }}
-    {scope} QScrollBar::groove:vertical {{
-        background: transparent;
-        border: none;
-    }}
-    {scope} QScrollBar::handle:vertical {{
-        background: {c['text_mute']};
-        min-height: 32px;
-        border-radius: 4px;
-    }}
-    {scope} QScrollBar::handle:vertical:hover {{
-        background: {c['text_dim']};
-    }}
-    {scope} QScrollBar::handle:vertical:pressed {{
-        background: {c['accent']};
-    }}
-    {scope} QScrollBar::add-line:vertical,
-    {scope} QScrollBar::sub-line:vertical {{
-        height: 0; width: 0; background: none; border: none;
-    }}
-    {scope} QScrollBar::up-arrow:vertical,
-    {scope} QScrollBar::down-arrow:vertical {{
-        height: 0; width: 0; background: none; border: none;
-    }}
-    {scope} QScrollBar::add-page:vertical,
-    {scope} QScrollBar::sub-page:vertical {{
-        background: transparent;
-    }}
-    {scope} QScrollBar:horizontal {{
-        height: 0; background: transparent;
-    }}
-    """
 
 
 # ── Main stylesheet ──────────────────────────────────────────────────────────
@@ -350,10 +287,9 @@ def main_qss() -> str:
     }}
 
     QFrame#targetPill {{
-        background: {c['bg_input']};
-        border: 1px solid {c['border_hi']};
-        border-radius: 14px;
-        padding: 5px 11px;
+        background: transparent;
+        border: none;
+        padding: 0;
     }}
     QLabel#targetLabel    {{ color: {c['text_mute']}; font-family: {FONT_MONO}; font-size: 11px; }}
     QLabel#targetName     {{ color: {c['text']};      font-family: {FONT_MONO}; font-size: 12px; }}
@@ -370,8 +306,59 @@ def main_qss() -> str:
         font-size: 13px;
         selection-background-color: {c['accent']};
     }}
-    QTextEdit#promptInput:focus {{
-        border: 1px solid {c['accent']};
+    QTextEdit#promptInput:focus {{ border: 1px solid {c['border_hi']}; }}
+    QTextEdit#chatInput {{
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 2px 3px;
+        color: {c['text']};
+        font-family: {FONT_SANS};
+        font-size: 13px;
+        selection-background-color: {c['accent']};
+    }}
+    QTextEdit#chatInput:focus {{ border: none; }}
+    QTextEdit#chatInput:disabled {{
+        color: {c['text_mute']};
+    }}
+    QMenu#modelEffortMenu,
+    QMenu#modelEffortSubmenu {{
+        background: transparent;
+        border: none;
+        padding: 5px;
+        color: {c['text']};
+        font-family: {FONT_SANS};
+        font-size: 12px;
+    }}
+    QMenu#modelEffortMenu::item {{
+        min-height: 20px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        color: transparent;
+    }}
+    QMenu#modelEffortSubmenu::item {{
+        min-height: 20px;
+        padding: 7px 28px 7px 10px;
+        border-radius: 6px;
+        color: {c['text']};
+    }}
+    QMenu#modelEffortMenu::item:selected {{
+        background: {c['bg_card_hi']};
+        color: transparent;
+    }}
+    QMenu#modelEffortSubmenu::item:selected {{
+        background: {c['bg_card_hi']};
+        color: {c['accent_hi']};
+    }}
+    QMenu#modelEffortMenu::right-arrow {{
+        image: none;
+        width: 0px;
+        height: 0px;
+    }}
+    QMenu#modelEffortSubmenu::indicator {{
+        image: none;
+        width: 0;
+        height: 0;
     }}
 
     /* ── Hint text ───────────────────────────────────────────────────── */
@@ -428,11 +415,6 @@ def main_qss() -> str:
        skip the erase step and leave ghost / double-text artefacts. */
     QWidget#chatContainer   {{ background: {c['bg_elev']}; }}
 
-    /* Scrollbar styling lives in scrollbar_qss() and is emitted here (in the
-       ancestor sheet) — styling the bare scrollbar widget directly leaves the
-       handle unrendered.  Colours come from the live theme. */
-    {scrollbar_qss("QScrollArea#chatScroll")}
-
     /* ── Inline engine activity ─────────────────────────────────────── */
     QScrollArea#workingActivityPane,
     QScrollArea#workingActivityPane > QWidget > QWidget,
@@ -452,14 +434,17 @@ def main_qss() -> str:
         font-size: 10px;
         background: transparent;
     }}
-    {scrollbar_qss("QScrollArea#workingActivityPane")}
-
     /* ── Chat input row — the left divider + top border are drawn by
           _SplitterHandle (which blends into this row's bg), so no
           border-left here; it would double the divider line. ──────────── */
     QFrame#chatInputRow {{
-        background: {c['bg_card']};
-        border-top: 1px solid {c['border_hi']};
+        background: {c['bg_elev']};
+        border: none;
+    }}
+    QFrame#chatComposer {{
+        background: {c['bg_input']};
+        border: 1px solid {c['border_hi']};
+        border-radius: 16px;
     }}
 
     /* ── Drawer history (ConversationDrawer) ─────────────────────────── */
@@ -496,7 +481,6 @@ def main_qss() -> str:
         font-family: {FONT_SANS};
         font-size: 12px;
     }}
-    {scrollbar_qss("QListWidget#sessionList")}
     QListWidget#sessionList::item {{
         padding: 0;
         margin: 2px 8px;
@@ -551,30 +535,55 @@ def main_qss() -> str:
     }}
 
     /* ── Settings dialog inputs ─────────────────────────────────────── */
+    QWidget#settingsBody QFrame#settingsRow {{
+        background: transparent;
+        border: none;
+        border-radius: 7px;
+    }}
+    QWidget#settingsBody QFrame#settingsRow:hover {{
+        background: {c['bg_card_hi']};
+    }}
+    QWidget#settingsBody QFrame#settingsRow QLabel#settingsRowLabel {{
+        background: transparent;
+        color: {c['text']};
+        font-family: {FONT_SANS};
+        font-size: 12px;
+    }}
+    QWidget#settingsBody QFrame#settingsGroup {{
+        background: transparent;
+        border: none;
+    }}
+
     QLineEdit, QSpinBox {{
         background: {c['bg_input']};
         border: 1px solid {c['border_hi']};
         border-radius: 7px;
-        padding: 6px 9px;
         color: {c['text']};
         font-family: {FONT_SANS};
         font-size: 12px;
         selection-background-color: {c['accent']};
     }}
+    QLineEdit {{ padding: 6px 9px; }}
+    QSpinBox {{ padding: 6px 34px 6px 9px; }}
     QLineEdit:focus, QSpinBox:focus {{ border: 1px solid {c['accent']}; }}
     QLineEdit:disabled, QSpinBox:disabled {{
         background: {c['bg_card']};
         border-color: {c['border']};
         color: {c['text_mute']};
     }}
-    QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; }}
+    QSpinBox::up-button, QSpinBox::down-button {{
+        width: 0;
+        height: 0;
+        border: none;
+        background: transparent;
+    }}
 
     /* ── Combo boxes (model tier, theme) ────────────────────────────── */
     QComboBox {{
         background: {c['bg_input']};
         border: 1px solid {c['border_hi']};
         border-radius: 7px;
-        padding: 5px 9px;
+        padding: 5px 34px 5px 9px;
         color: {c['text']};
         font-family: {FONT_SANS};
         font-size: 12px;
@@ -594,15 +603,12 @@ def main_qss() -> str:
         border: none;
         background: transparent;
     }}
-    /* Small downward triangle drawn with borders (no image asset needed). */
     QComboBox::down-arrow {{
-        width: 0; height: 0;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-top: 5px solid {c['text_mute']};
-        margin-right: 8px;
+        image: none;
+        width: 0;
+        height: 0;
+        border: none;
     }}
-    QComboBox::down-arrow:hover {{ border-top: 5px solid {c['accent']}; }}
     /* The popup list. */
     QComboBox QAbstractItemView {{
         background: {c['bg_card']};
@@ -634,8 +640,8 @@ def main_qss() -> str:
     QCheckBox {{
         color: {c['text']};
         font-size: 12px;
-        spacing: 8px;
-        padding: 3px 0;
+        spacing: 0;
+        padding: 0;
         background: transparent;
     }}
     QCheckBox::indicator {{

@@ -30,6 +30,7 @@ from .styles import (
     STATUS_LABEL,
     MOTION_NORMAL_MS,
 )
+from .scrollbars import install_scrollbars
 
 
 NODE_W = 160
@@ -425,26 +426,6 @@ class NodeItem(QtWidgets.QGraphicsObject):
 #  Node info panel — floating overlay
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _scroll_bar_qss() -> str:
-    """Built from the live theme (not cached at import) so it follows switches."""
-    c = COLORS
-    return f"""
-    QScrollBar:vertical {{
-        background: {c['bg_card']};
-        width: 6px; border: none; border-radius: 3px; margin: 0;
-    }}
-    QScrollBar::handle:vertical {{
-        background: {c['text_mute']};
-        border-radius: 3px; min-height: 20px;
-    }}
-    QScrollBar::handle:vertical:hover {{ background: {c['accent']}; }}
-    QScrollBar::add-page:vertical,
-    QScrollBar::sub-page:vertical {{ background: transparent; }}
-    QScrollBar::add-line:vertical,
-    QScrollBar::sub-line:vertical {{ height: 0px; }}
-"""
-
-
 class NodeInfoPanel(QtWidgets.QFrame):
     """Floating panel showing node details on click."""
 
@@ -513,11 +494,12 @@ class NodeInfoPanel(QtWidgets.QFrame):
 
         # Scrollable content
         self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setObjectName("nodeInfoScroll")
+        install_scrollbars(self._scroll, "bg_card")
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._scroll.verticalScrollBar().setStyleSheet(_scroll_bar_qss())
 
         content = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(content)
@@ -583,7 +565,6 @@ class NodeInfoPanel(QtWidgets.QFrame):
                 f"font-size: 9px; letter-spacing: 1px;")
         for _b in (self._sum_lbl, self._notes_lbl):
             _b.setStyleSheet(f"color: {c['text_dim']}; font-size: 11px;")
-        self._scroll.verticalScrollBar().setStyleSheet(_scroll_bar_qss())
 
     def _close(self) -> None:
         self.hide(); self.sig_closed.emit()
@@ -794,7 +775,7 @@ class FunctionGraphView(QtWidgets.QGraphicsView):
                 border-radius: 9px;
                 color: {c['text_dim']};
                 font-size: 11px;
-                padding: 0 10px;
+                padding: 0 12px;
             }}
             QCheckBox:hover {{
                 background: {c['bg_card_hi']};
@@ -804,6 +785,7 @@ class FunctionGraphView(QtWidgets.QGraphicsView):
             QCheckBox::indicator {{
                 width: 13px;
                 height: 13px;
+                margin-right: 7px;
                 border-radius: 4px;
                 border: 1px solid {c['border_hi']};
                 background: {c['bg_input']};
@@ -854,17 +836,7 @@ class FunctionGraphView(QtWidgets.QGraphicsView):
         # toggle sits immediately to its left and is intentionally in-memory only.
         gap = 8
         available = max(0, self.width() - m * 2)
-        compact_toggle = available < 340
-        toggle_text = "" if compact_toggle else "Hide skipped functions"
-        if self._hide_skipped_toggle.text() != toggle_text:
-            self._hide_skipped_toggle.setText(toggle_text)
-        toggle_w = (
-            38 if compact_toggle
-            else max(
-                146,
-                min(178, self._hide_skipped_toggle.sizeHint().width() + 18),
-            )
-        )
+        toggle_w = self._hide_skipped_toggle.sizeHint().width()
         sw_w = min(260, max(160, self.width() // 3))
         if toggle_w + gap + sw_w > available:
             sw_w = max(150, available - toggle_w - gap)

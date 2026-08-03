@@ -143,6 +143,50 @@ def _get_function_name(cmd: dict) -> dict:
     return {"type": "string_result", "value": name}
 
 
+_BATCHABLE_COMMANDS = {
+    "get_function_code",
+    "get_function_global_values",
+    "get_function_name",
+    "rename_function",
+    "rename_lvars",
+    "rename_params",
+    "rename_global",
+    "rename_vtable",
+    "replace_struct",
+    "set_comment",
+    "set_address_comment",
+    "find_vcall_sites",
+    "mark_cfunc_dirty",
+}
+
+
+def _execute_batch(cmd: dict) -> dict:
+    """Execute ordered reversal operations in one IDA main-thread dispatch."""
+    commands = cmd.get("commands", [])
+    if not isinstance(commands, list):
+        return {"type": "error_result", "error": "commands must be a list"}
+    if len(commands) > 4096:
+        return {"type": "error_result", "error": "too many batched commands"}
+
+    results = []
+    for item in commands:
+        if not isinstance(item, dict):
+            results.append({"type": "error_result", "error": "invalid batched command"})
+            continue
+        command_type = str(item.get("type", "") or "")
+        if command_type not in _BATCHABLE_COMMANDS:
+            results.append({
+                "type": "error_result",
+                "error": f"Command cannot be batched: {command_type[:128]}",
+            })
+            continue
+        try:
+            results.append(_DISPATCH[command_type](item))
+        except Exception as exc:
+            results.append({"type": "error_result", "error": str(exc)})
+    return {"type": "batch_result", "results": results}
+
+
 def _find_function_by_name(cmd: dict) -> dict:
     ea = find_function_by_name(cmd["name"])
     return {"type": "string_result", "value": hex(ea) if ea is not None else ""}
@@ -1255,6 +1299,7 @@ def _approve_project_build() -> tuple[bool, str]:
 
 
 _DISPATCH = {
+    "execute_batch":            _execute_batch,
     "get_function_code":        _get_function_code,
     "get_function_global_values": _get_function_global_values,
     "get_function_pseudocode":  _get_function_pseudocode,

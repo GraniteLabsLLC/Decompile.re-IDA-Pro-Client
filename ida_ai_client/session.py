@@ -461,6 +461,8 @@ class ServerSession:
         struct_member_style: str,
         skip_reversing: bool,
         max_call_depth: int,
+        guess_virtual_function_calls: bool = False,
+        agent_reasoning_level: str = "high",
         decompiler: str = "ida",
         current_view: dict | None = None,
     ) -> str:
@@ -473,6 +475,7 @@ class ServerSession:
             "root_ea":              hex(root_ea),
             "user_prompt":          user_prompt,
             "model_tier":           model_tier,
+            "agent_reasoning_level": agent_reasoning_level,
             "auto_renames":         auto_renames,
             "auto_types":           auto_types,
             "auto_structs":         auto_structs,
@@ -480,6 +483,7 @@ class ServerSession:
             "struct_member_style":  struct_member_style,
             "skip_reversing":       skip_reversing,
             "max_call_depth":       max_call_depth,
+            "guess_virtual_function_calls": guess_virtual_function_calls,
             "decompiler":           decompiler,
             "protocol_version":     1,
         }
@@ -741,7 +745,13 @@ class ServerSession:
             )
         return statuses
 
-    def send_chat(self, message: str, current_view: dict | None = None) -> None:
+    def send_chat(
+        self,
+        message: str,
+        current_view: dict | None = None,
+        model_tier: str = "fast",
+        agent_reasoning_level: str = "high",
+    ) -> None:
         """Send a follow-up chat message to an active (post-analysis) session.
 
         The server queues the message and delivers the response asynchronously
@@ -760,6 +770,8 @@ class ServerSession:
                 json={
                     "message": message,
                     "current_view": dict(current_view) if current_view else None,
+                    "model_tier": model_tier,
+                    "agent_reasoning_level": agent_reasoning_level,
                 },
                 timeout=10,
                 headers=self._auth_headers(),
@@ -778,8 +790,8 @@ class ServerSession:
                 err = ""
             raise RuntimeError(f"Chat send failed: HTTP {resp.status_code} {err}")
 
-    def cancel(self) -> None:
-        """Cancel the session. Swallows transport errors -- best-effort."""
+    def cancel_operation(self) -> None:
+        """Stop the active agent/reversal operation without ending the session."""
         if not self.session_id:
             return
         try:
@@ -788,6 +800,23 @@ class ServerSession:
             self._request(
                 "DELETE",
                 f"{self.server_url}/session/{session_id}",
+                timeout=5,
+                headers=self._auth_headers(),
+                allow_redirects=False,
+            )
+        except Exception:
+            pass
+
+    def cancel(self) -> None:
+        """Terminate the session. Swallows transport errors -- best-effort."""
+        if not self.session_id:
+            return
+        try:
+            session_id = _require_protocol_id(self.session_id, "session ID")
+            self._ensure_access_jwt()
+            self._request(
+                "DELETE",
+                f"{self.server_url}/session/{session_id}?terminate=true",
                 timeout=5,
                 headers=self._auth_headers(),
                 allow_redirects=False,

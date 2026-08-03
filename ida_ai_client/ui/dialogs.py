@@ -66,6 +66,7 @@ from .styles     import (
     apply_theme,
     theme_names,
 )
+from .scrollbars import install_scrollbars
 
 try:
     from pygments import highlight as _pygments_highlight
@@ -93,12 +94,19 @@ _MODEL_TIER_OPTIONS = [
     ("Smart",   "smart"),
 ]
 
+_AGENT_REASONING_OPTIONS = [
+    ("Low", "low"),
+    ("Medium", "medium"),
+    ("High", "high"),
+    ("Extra High", "extra_high"),
+]
 
-def _tier_label_for(tier_value: str) -> int:
-    for i, (_label, value) in enumerate(_MODEL_TIER_OPTIONS):
-        if value == tier_value:
-            return i
-    return 0
+
+def _option_label(options, value: str, fallback_index: int = 0) -> str:
+    for label, option_value in options:
+        if option_value == value:
+            return label
+    return options[fallback_index][0]
 
 
 # Human-readable copy for 402 reasons returned by the server.
@@ -289,7 +297,7 @@ class OutlinedButton(QtWidgets.QPushButton):
                  variant: str = "", parent=None):
         super().__init__(text, parent)
         self._primary = primary
-        self._variant = variant  # "danger" | "warn" | ""
+        self._variant = variant  # "danger" | "warn" | "neutral" | "subtle" | ""
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_StyledBackground, False)
@@ -313,15 +321,14 @@ class OutlinedButton(QtWidgets.QPushButton):
         if self._primary:
             if not enabled:
                 return c['border_lo'], c['border_hi'], c['bg_card_hi'], c['text_mute']
-            # "subtle" variant: raised fill (lighter than the dialog surface),
-            # accent border + accent text. bg_card_hi is the lightest surface
-            # tone, so the button reads as a raised, clickable element.
+            # "subtle" variant: raised neutral surface and outline with accent
+            # text. This keeps the action prominent without a bright border.
             if self._variant == "subtle":
                 if pressed:
-                    return c['accent'], c['accent_lo'], c['bg_card'], c['accent_hi']
+                    return c['border_lo'], c['border'], c['bg_card'], c['accent_hi']
                 if hover:
-                    return c['accent_hi'], c['accent'], c['border_hi'], c['accent_hi']
-                return c['accent_lo'], c['accent_hi'], c['bg_card_hi'], c['accent']
+                    return c['border'], c['border_hi'], c['border_hi'], c['accent_hi']
+                return c['border_lo'], c['border_hi'], c['bg_card_hi'], c['accent']
             if pressed:
                 return c['accent_hi'], c['accent_lo'], c['accent_lo'], "#ffffff"
             if hover:
@@ -331,6 +338,7 @@ class OutlinedButton(QtWidgets.QPushButton):
         hov_accent = {
             "danger": c['failed'],
             "warn":   c['warn'],
+            "neutral": c['border_hi'],
         }.get(self._variant, c['accent'])
 
         if not enabled:
@@ -348,7 +356,11 @@ class OutlinedButton(QtWidgets.QPushButton):
         rect = QtCore.QRectF(self.rect())
         radius = 8 if self._primary else 7
         outer_c, inner_c, fill_c, text_c = self._colors()
-        if self.hasFocus() and self.isEnabled():
+        if (
+            self.hasFocus()
+            and self.isEnabled()
+            and self._variant not in {"subtle", "neutral"}
+        ):
             outer_c = COLORS["accent_hi"]
             inner_c = COLORS["accent"]
 
@@ -399,6 +411,562 @@ class OutlinedButton(QtWidgets.QPushButton):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Helper widgets
 # ═══════════════════════════════════════════════════════════════════════════
+
+_QMenuBase = getattr(QtWidgets, "QMenu", QtWidgets.QWidget)
+_QProxyStyleBase = getattr(QtWidgets, "QProxyStyle", None)
+
+
+if _QProxyStyleBase is not None:
+    class _NoMenuShadowStyle(_QProxyStyleBase):
+        def styleHint(
+            self,
+            hint,
+            option=None,
+            widget=None,
+            return_data=None,
+        ):  # type: ignore[override]
+            shadow_hint = getattr(
+                QtWidgets.QStyle,
+                "SH_Menu_DropShadowEnabled",
+                None,
+            )
+            if shadow_hint is None:
+                style_hints = getattr(QtWidgets.QStyle, "StyleHint", None)
+                shadow_hint = getattr(
+                    style_hints,
+                    "SH_Menu_DropShadowEnabled",
+                    None,
+                )
+            if shadow_hint is not None and hint == shadow_hint:
+                return 0
+            return super().styleHint(hint, option, widget, return_data)
+else:
+    _NoMenuShadowStyle = None
+
+
+class _RoundedPopupMenu(_QMenuBase):
+    _RADIUS = 9.0
+
+    def __init__(self, object_name: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName(object_name)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        frameless_hint = getattr(Qt, "FramelessWindowHint", None)
+        if frameless_hint is not None:
+            self.setWindowFlag(frameless_hint, True)
+        no_shadow_hint = getattr(Qt, "NoDropShadowWindowHint", None)
+        if no_shadow_hint is not None:
+            self.setWindowFlag(no_shadow_hint, True)
+
+    def _apply_rounded_mask(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        path = QtGui.QPainterPath()
+        rect = QtCore.QRectF(self.rect()).adjusted(0.0, 0.0, -0.01, -0.01)
+        path.addRoundedRect(rect, self._RADIUS, self._RADIUS)
+        self.setMask(QtGui.QRegion(path.toFillPolygon().toPolygon()))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_rounded_mask()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._apply_rounded_mask()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QtGui.QColor(COLORS["bg_card"]))
+        painter.drawRoundedRect(rect, self._RADIUS, self._RADIUS)
+
+        painter.end()
+
+        super().paintEvent(event)
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["border_hi"]), 1.0))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, self._RADIUS, self._RADIUS)
+        painter.end()
+
+
+class _ModelEffortSubmenu(_RoundedPopupMenu):
+    _RIGHT_PADDING = 10.0
+    _CHECK_WIDTH = 8.0
+
+    def __init__(self, parent=None):
+        super().__init__("modelEffortSubmenu", parent)
+        if _NoMenuShadowStyle is not None:
+            self._shadowless_style = _NoMenuShadowStyle()
+            self._shadowless_style.setParent(self)
+            self.setStyle(self._shadowless_style)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["accent_hi"]), 1.35))
+        painter.setBrush(Qt.NoBrush)
+
+        for action in self.actions():
+            if not action.isChecked():
+                continue
+            rect = self.actionGeometry(action)
+            if rect.isEmpty():
+                continue
+            right = rect.right() - self._RIGHT_PADDING
+            center_y = rect.center().y()
+            path = QtGui.QPainterPath()
+            path.moveTo(right - self._CHECK_WIDTH, center_y)
+            path.lineTo(right - self._CHECK_WIDTH + 3.0, center_y + 3.0)
+            path.lineTo(right, center_y - 3.0)
+            painter.drawPath(path)
+
+
+class _ModelEffortMenu(_RoundedPopupMenu):
+    _LEFT_PADDING = 10
+    _RIGHT_PADDING = 10
+    _COLUMN_GAP = 14
+    _ARROW_GAP = 10
+    _ARROW_WIDTH = 3
+    _ARROW_HEIGHT = 6
+
+    def __init__(self, parent=None):
+        super().__init__("modelEffortMenu", parent)
+        self._rows = {}
+
+    def set_row(self, action, label: str, selected: str) -> None:
+        self._rows[action] = (label, selected)
+        action.setText(f"{label} {selected}")
+        self._resize_to_content()
+
+    def _resize_to_content(self) -> None:
+        metrics = QtGui.QFontMetrics(self.font())
+        content_width = 0
+        for label, selected in self._rows.values():
+            content_width = max(
+                content_width,
+                metrics.horizontalAdvance(label)
+                + self._COLUMN_GAP
+                + metrics.horizontalAdvance(selected),
+            )
+        width = (
+            12  # menu padding and border from the stylesheet
+            + self._LEFT_PADDING
+            + content_width
+            + self._ARROW_GAP
+            + self._ARROW_WIDTH
+            + self._RIGHT_PADDING
+        )
+        self.setFixedWidth(width)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        metrics = QtGui.QFontMetrics(self.font())
+        muted = QtGui.QColor(COLORS["text_mute"])
+
+        for action, (label, selected) in self._rows.items():
+            rect = self.actionGeometry(action)
+            if rect.isEmpty():
+                continue
+            left = rect.left() + self._LEFT_PADDING
+            arrow_right = rect.right() - self._RIGHT_PADDING
+            arrow_left = arrow_right - self._ARROW_WIDTH
+            selected_right = arrow_left - self._ARROW_GAP
+            selected_left = selected_right - metrics.horizontalAdvance(selected)
+
+            painter.setPen(QtGui.QColor(COLORS["text"]))
+            painter.drawText(
+                QtCore.QRectF(
+                    left,
+                    rect.top(),
+                    max(0, selected_left - self._COLUMN_GAP - left),
+                    rect.height(),
+                ),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                label,
+            )
+            painter.setPen(muted)
+            painter.drawText(
+                QtCore.QRectF(
+                    selected_left,
+                    rect.top(),
+                    max(0, selected_right - selected_left),
+                    rect.height(),
+                ),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                selected,
+            )
+
+            center_y = rect.center().y()
+            chevron = QtGui.QPainterPath()
+            chevron.moveTo(arrow_left, center_y - (self._ARROW_HEIGHT / 2.0))
+            chevron.lineTo(arrow_right, center_y)
+            chevron.lineTo(arrow_left, center_y + (self._ARROW_HEIGHT / 2.0))
+            painter.setPen(QtGui.QPen(muted, 1.2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(chevron)
+
+
+class _ModelEffortSelector(QtWidgets.QToolButton):
+    selection_changed = Signal(str, str)
+
+    _HORIZONTAL_PADDING = 9
+    _ICON_WIDTH = 10
+    _ICON_TEXT_GAP = 7
+    _TEXT_GAP = 6
+    _EFFORT_ARROW_GAP = 5
+    _ARROW_WIDTH = 6
+
+    def __init__(self, model_tier: str, reasoning_level: str, parent=None):
+        super().__init__(parent)
+        self._model_tier = model_tier
+        self._reasoning_level = reasoning_level
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("Choose the model and agent reasoning effort")
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        self.setFixedHeight(30)
+
+        self._menu = _ModelEffortMenu(self)
+        self._model_menu = _ModelEffortSubmenu(self._menu)
+        self._menu.addMenu(self._model_menu)
+        self._effort_menu = _ModelEffortSubmenu(self._menu)
+        self._menu.addMenu(self._effort_menu)
+
+        self._model_actions = []
+        for label, value in _MODEL_TIER_OPTIONS:
+            action = self._model_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selected=value: self._select_model(selected)
+            )
+            self._model_actions.append((action, value))
+
+        self._effort_actions = []
+        for label, value in _AGENT_REASONING_OPTIONS:
+            action = self._effort_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selected=value: self._select_effort(selected)
+            )
+            self._effort_actions.append((action, value))
+
+        self.setMenu(self._menu)
+        popup_mode = getattr(QtWidgets.QToolButton, "InstantPopup", None)
+        if popup_mode is None:
+            popup_mode = QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        self.setPopupMode(popup_mode)
+        self._menu.aboutToShow.connect(self._refresh_menu)
+        self.set_selection(model_tier, reasoning_level)
+
+    def _select_model(self, value: str) -> None:
+        self.set_selection(value, self._reasoning_level)
+        self.selection_changed.emit(self._model_tier, self._reasoning_level)
+
+    def _select_effort(self, value: str) -> None:
+        self.set_selection(self._model_tier, value)
+        self.selection_changed.emit(self._model_tier, self._reasoning_level)
+
+    def set_selection(self, model_tier: str, reasoning_level: str) -> None:
+        model_values = {value for _label, value in _MODEL_TIER_OPTIONS}
+        effort_values = {value for _label, value in _AGENT_REASONING_OPTIONS}
+        self._model_tier = model_tier if model_tier in model_values else "fast"
+        self._reasoning_level = (
+            reasoning_level if reasoning_level in effort_values else "high"
+        )
+        self._refresh_menu()
+        self.updateGeometry()
+        self.update()
+
+    def _refresh_menu(self) -> None:
+        model_label = _option_label(_MODEL_TIER_OPTIONS, self._model_tier)
+        effort_label = _option_label(
+            _AGENT_REASONING_OPTIONS,
+            self._reasoning_level,
+            2,
+        )
+        self._menu.set_row(self._model_menu.menuAction(), "Model", model_label)
+        self._menu.set_row(self._effort_menu.menuAction(), "Effort", effort_label)
+        self._resize_submenu(self._model_menu, _MODEL_TIER_OPTIONS)
+        self._resize_submenu(self._effort_menu, _AGENT_REASONING_OPTIONS)
+        self.setText(f"{model_label} {effort_label}")
+        self.setAccessibleName(
+            f"Model {model_label}, reasoning effort {effort_label}"
+        )
+        for action, value in self._model_actions:
+            action.setChecked(value == self._model_tier)
+        for action, value in self._effort_actions:
+            action.setChecked(value == self._reasoning_level)
+
+    @staticmethod
+    def _resize_submenu(menu, options) -> None:
+        metrics = QtGui.QFontMetrics(menu.font())
+        longest = max(metrics.horizontalAdvance(label) for label, _value in options)
+        menu.setFixedWidth(longest + 50)
+
+    def _display_font(self):
+        font = self.font()
+        font.setPointSize(10)
+        return font
+
+    def sizeHint(self):  # type: ignore[override]
+        model_label = _option_label(_MODEL_TIER_OPTIONS, self._model_tier)
+        effort_label = _option_label(
+            _AGENT_REASONING_OPTIONS,
+            self._reasoning_level,
+            2,
+        )
+        metrics = QtGui.QFontMetrics(self._display_font())
+        width = (
+            self._HORIZONTAL_PADDING
+            + self._ICON_WIDTH
+            + self._ICON_TEXT_GAP
+            + metrics.horizontalAdvance(model_label)
+            + self._TEXT_GAP
+            + metrics.horizontalAdvance(effort_label)
+            + self._EFFORT_ARROW_GAP
+            + self._ARROW_WIDTH
+            + self._HORIZONTAL_PADDING
+        )
+        return QSize(width, 30)
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        enabled = self.isEnabled()
+        hovered = self.underMouse() and enabled
+        if hovered:
+            rect = QtCore.QRectF(self.rect())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QtGui.QColor(COLORS["bg_card_hi"]))
+            radius = rect.height() / 2.0
+            painter.drawRoundedRect(rect, radius, radius)
+
+        primary = COLORS["text"] if enabled else COLORS["text_mute"]
+        secondary = COLORS["text_mute"]
+        center_y = self.height() / 2.0
+
+        icon_left = float(self._HORIZONTAL_PADDING)
+        bolt = QtGui.QPainterPath()
+        bolt.moveTo(icon_left + 6.5, center_y - 7.0)
+        bolt.lineTo(icon_left, center_y + 1.0)
+        bolt.lineTo(icon_left + 4.5, center_y + 1.0)
+        bolt.lineTo(icon_left + 3.5, center_y + 7.0)
+        bolt.lineTo(icon_left + 10.0, center_y - 1.0)
+        bolt.lineTo(icon_left + 5.5, center_y - 1.0)
+        bolt.closeSubpath()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QtGui.QColor(primary))
+        painter.drawPath(bolt)
+
+        model_label = _option_label(_MODEL_TIER_OPTIONS, self._model_tier)
+        effort_label = _option_label(
+            _AGENT_REASONING_OPTIONS,
+            self._reasoning_level,
+            2,
+        )
+        font = self._display_font()
+        painter.setFont(font)
+        metrics = QtGui.QFontMetrics(font)
+        model_x = (
+            self._HORIZONTAL_PADDING
+            + self._ICON_WIDTH
+            + self._ICON_TEXT_GAP
+        )
+        text_rect = QtCore.QRectF(
+            model_x,
+            0.0,
+            metrics.horizontalAdvance(model_label),
+            self.height(),
+        )
+        painter.setPen(QtGui.QColor(primary))
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, model_label)
+        effort_x = model_x + metrics.horizontalAdvance(model_label) + self._TEXT_GAP
+        painter.setPen(QtGui.QColor(secondary))
+        painter.drawText(
+            QtCore.QRectF(
+                effort_x,
+                0.0,
+                metrics.horizontalAdvance(effort_label),
+                self.height(),
+            ),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            effort_label,
+        )
+
+        chevron_left = (
+            effort_x
+            + metrics.horizontalAdvance(effort_label)
+            + self._EFFORT_ARROW_GAP
+        )
+        chevron = QtGui.QPainterPath()
+        chevron.moveTo(chevron_left, center_y - 1.5)
+        chevron.lineTo(chevron_left + 3.0, center_y + 1.5)
+        chevron.lineTo(chevron_left + self._ARROW_WIDTH, center_y - 1.5)
+        painter.setPen(
+            QtGui.QPen(QtGui.QColor(COLORS["text_mute"]), 1.2)
+        )
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(chevron)
+
+
+class _AgentPromptEdit(QtWidgets.QTextEdit):
+    profile_changed = Signal(str, str)
+
+    def __init__(
+        self,
+        object_name: str,
+        model_tier: str,
+        reasoning_level: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        install_scrollbars(self, "bg_input")
+        self.setObjectName(object_name)
+        self._profile_selector_embedded = True
+        self._dynamic_height_min = 0
+        self._dynamic_height_max = 0
+        self._dynamic_height_pending = False
+        self.setViewportMargins(0, 0, 0, 38)
+        self.profile_selector = _ModelEffortSelector(
+            model_tier,
+            reasoning_level,
+            self,
+        )
+        self.profile_selector.selection_changed.connect(self.profile_changed.emit)
+
+    def set_dynamic_height_range(self, minimum: int, maximum: int) -> None:
+        self._dynamic_height_min = max(1, int(minimum))
+        self._dynamic_height_max = max(
+            self._dynamic_height_min,
+            int(maximum),
+        )
+        self.setMinimumHeight(self._dynamic_height_min)
+        self.setMaximumHeight(self._dynamic_height_max)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        self.document().contentsChanged.connect(self._schedule_dynamic_height)
+        self._schedule_dynamic_height()
+
+    def _schedule_dynamic_height(self) -> None:
+        if not self._dynamic_height_max or self._dynamic_height_pending:
+            return
+        self._dynamic_height_pending = True
+        QtCore.QTimer.singleShot(0, self._refresh_dynamic_height)
+
+    def _refresh_dynamic_height(self) -> None:
+        self._dynamic_height_pending = False
+        if not self._dynamic_height_max:
+            return
+        document_height = math.ceil(
+            self.document().documentLayout().documentSize().height()
+        )
+        margins = self.contentsMargins()
+        required_height = (
+            document_height
+            + margins.top()
+            + margins.bottom()
+            + (2 * self.frameWidth())
+        )
+        target_height = max(
+            self._dynamic_height_min,
+            min(self._dynamic_height_max, required_height),
+        )
+        if self.height() != target_height:
+            self.setFixedHeight(target_height)
+        policy = (
+            Qt.ScrollBarAsNeeded
+            if required_height > self._dynamic_height_max
+            else Qt.ScrollBarAlwaysOff
+        )
+        if self.verticalScrollBarPolicy() != policy:
+            self.setVerticalScrollBarPolicy(policy)
+
+    def detach_profile_selector(self):
+        self._profile_selector_embedded = False
+        self.setViewportMargins(0, 0, 0, 0)
+        return self.profile_selector
+
+    def set_model_effort(self, model_tier: str, reasoning_level: str) -> None:
+        self.profile_selector.set_selection(model_tier, reasoning_level)
+        self._position_profile_selector()
+
+    def _position_profile_selector(self) -> None:
+        if not self._profile_selector_embedded:
+            return
+        selector = self.profile_selector
+        selector.resize(selector.sizeHint())
+        selector.move(
+            max(8, self.width() - selector.width() - 8),
+            max(8, self.height() - selector.height() - 7),
+        )
+        selector.raise_()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_profile_selector()
+        self._schedule_dynamic_height()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._position_profile_selector()
+
+
+class _ChatSendButton(QtWidgets.QToolButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("Send message")
+        self.setAccessibleName("Send message")
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        fill = QtGui.QColor(COLORS["text"])
+        if not self.isEnabled():
+            fill = QtGui.QColor(COLORS["border_hi"])
+        elif self.underMouse():
+            fill = fill.lighter(112)
+
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(fill)
+        painter.drawEllipse(rect)
+
+        center_x = rect.center().x()
+        center_y = rect.center().y()
+        arrow = QtGui.QPainterPath()
+        arrow.moveTo(center_x, center_y - 5.0)
+        arrow.lineTo(center_x - 4.0, center_y - 1.0)
+        arrow.moveTo(center_x, center_y - 5.0)
+        arrow.lineTo(center_x + 4.0, center_y - 1.0)
+        arrow.moveTo(center_x, center_y - 5.0)
+        arrow.lineTo(center_x, center_y + 5.0)
+        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["bg_input"]), 1.5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(arrow)
+
 
 class IconButton(QtWidgets.QToolButton):
     """Small icon-only button used in the title bar."""
@@ -721,19 +1289,19 @@ class TitleBar(QtWidgets.QFrame):
 
 
 class TargetPill(QtWidgets.QFrame):
-    """The function-name pill at the top of the compact prompt."""
-    sig_refresh = Signal()
+    """The current function or address at the top of the compact prompt."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("targetPill")
+        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
 
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 6, 0)
+        lay.setContentsMargins(11, 5, 11, 5)
         lay.setSpacing(8)
 
-        lbl = QtWidgets.QLabel("Target")
+        lbl = QtWidgets.QLabel("Viewing:")
         lbl.setObjectName("targetLabel")
         lay.addWidget(lbl)
 
@@ -745,14 +1313,14 @@ class TargetPill(QtWidgets.QFrame):
         self._ea.setObjectName("targetEA")
         lay.addWidget(self._ea)
 
-        btn = QtWidgets.QToolButton()
-        btn.setObjectName("iconBtn")
-        btn.setText("↻")
-        btn.setToolTip("Refresh from cursor")
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setFixedSize(20, 20)
-        btn.clicked.connect(self.sig_refresh.emit)
-        lay.addWidget(btn)
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(14.0, rect.height() / 2.0)
+        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["border_hi"]), 1.0))
+        painter.setBrush(QtGui.QColor(COLORS["bg_input"]))
+        painter.drawRoundedRect(rect, radius, radius)
 
     def set_target(self, name: str, ea: Optional[int]) -> None:
         if ea is None:
@@ -868,17 +1436,28 @@ class _SendChatWorker(QtCore.QObject):
     sig_error = Signal(object, str)
     sig_finished = Signal(object)
 
-    def __init__(self, entry, message: str, current_view: dict):
+    def __init__(
+        self,
+        entry,
+        message: str,
+        current_view: dict,
+        model_tier: str,
+        reasoning_level: str,
+    ):
         super().__init__()
         self._entry = entry
         self._message = message
         self._current_view = dict(current_view)
+        self._model_tier = model_tier
+        self._reasoning_level = reasoning_level
 
     def run(self):
         try:
             self._entry.worker.send_chat(
                 self._message,
                 current_view=self._current_view,
+                model_tier=self._model_tier,
+                agent_reasoning_level=self._reasoning_level,
             )
         except Exception as exc:
             self.sig_error.emit(self._entry, str(exc))
@@ -977,6 +1556,236 @@ class _LoadSessionDetailWorker(QtCore.QObject):
             self.sig_error.emit(self._entry, str(exc))
 
 
+class _SettingsComboBox(QtWidgets.QComboBox):
+    """Settings combo with a consistent 3-by-3 grip indicator."""
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        color = COLORS["text_mute"]
+        if self.isEnabled() and self.underMouse():
+            color = COLORS["accent_hi"]
+        elif not self.isEnabled():
+            color = COLORS["border_hi"]
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QtGui.QColor(color))
+
+        square = 1.7
+        pitch = 3.4
+        total = square + (2 * pitch)
+        left = self.width() - 14.0 - (total / 2.0)
+        top = (self.height() - total) / 2.0
+        for row in range(3):
+            for column in range(3):
+                painter.drawRoundedRect(
+                    QtCore.QRectF(
+                        left + (column * pitch),
+                        top + (row * pitch),
+                        square,
+                        square,
+                    ),
+                    0.45,
+                    0.45,
+                )
+
+
+class _SettingsSpinButton(QtWidgets.QToolButton):
+    def __init__(self, direction: int, parent=None):
+        super().__init__(parent)
+        self._direction = direction
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setAccessibleName(
+            "Increase value" if direction > 0 else "Decrease value"
+        )
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        if self.isEnabled() and self.underMouse():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QtGui.QColor(COLORS["bg_card_hi"]))
+            painter.drawRoundedRect(QtCore.QRectF(self.rect()), 4.0, 4.0)
+
+        color = COLORS["text_mute"]
+        if self.isEnabled() and self.underMouse():
+            color = COLORS["accent_hi"]
+        elif not self.isEnabled():
+            color = COLORS["border_hi"]
+        center_x = self.width() / 2.0
+        center_y = self.height() / 2.0
+        path = QtGui.QPainterPath()
+        if self._direction > 0:
+            path.moveTo(center_x - 3.0, center_y + 1.5)
+            path.lineTo(center_x, center_y - 1.5)
+            path.lineTo(center_x + 3.0, center_y + 1.5)
+        else:
+            path.moveTo(center_x - 3.0, center_y - 1.5)
+            path.lineTo(center_x, center_y + 1.5)
+            path.lineTo(center_x + 3.0, center_y - 1.5)
+        painter.setPen(QtGui.QPen(QtGui.QColor(color), 1.2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+
+
+class _SettingsSpinBox(QtWidgets.QSpinBox):
+    _BUTTON_WIDTH = 24
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        button_symbols = getattr(
+            QtWidgets.QAbstractSpinBox,
+            "ButtonSymbols",
+            QtWidgets.QAbstractSpinBox,
+        )
+        self.setButtonSymbols(button_symbols.NoButtons)
+        self.lineEdit().setTextMargins(0, 0, self._BUTTON_WIDTH + 2, 0)
+        self._up_button = _SettingsSpinButton(1, self)
+        self._down_button = _SettingsSpinButton(-1, self)
+        self._up_button.clicked.connect(self.stepUp)
+        self._down_button.clicked.connect(self.stepDown)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        inner_height = max(0, self.height() - 4)
+        top_height = inner_height // 2
+        left = self.width() - self._BUTTON_WIDTH - 2
+        self._up_button.setGeometry(left, 2, self._BUTTON_WIDTH, top_height)
+        self._down_button.setGeometry(
+            left,
+            2 + top_height,
+            self._BUTTON_WIDTH,
+            inner_height - top_height,
+        )
+        self._up_button.raise_()
+        self._down_button.raise_()
+
+
+class _SettingsRow(QtWidgets.QFrame):
+    """Full-width settings row with one aligned, row-activated control."""
+
+    CONTROL_WIDTH = 220
+
+    def __init__(self, label: str, control, *, fixed_control_width: bool = True):
+        super().__init__()
+        self.setObjectName("settingsRow")
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._control = control
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(12)
+
+        self._label = QtWidgets.QLabel(label)
+        self._label.setObjectName("settingsRowLabel")
+        self._label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        if label:
+            control.setAccessibleName(label)
+        layout.addWidget(self._label)
+        layout.addStretch(1)
+        if fixed_control_width:
+            control.setFixedWidth(self.CONTROL_WIDTH)
+        layout.addWidget(control, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.setFocusProxy(control)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self._activate_control()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _activate_control(self) -> None:
+        control = self._control
+        if not control.isEnabled():
+            return
+        if isinstance(control, QtWidgets.QAbstractButton):
+            control.click()
+        elif isinstance(control, QtWidgets.QComboBox):
+            control.setFocus()
+            control.showPopup()
+        elif isinstance(control, QtWidgets.QAbstractSpinBox):
+            control.setFocus()
+            control.selectAll()
+        else:
+            control.setFocus()
+
+
+class _SettingsGroup(QtWidgets.QFrame):
+    _TOP = 8.0
+    _RADIUS = 9.0
+    _TITLE_LEFT = 18.0
+    _TITLE_PADDING = 6.0
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self.setObjectName("settingsGroup")
+        self.setAttribute(Qt.WA_StyledBackground, False)
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        rect = QtCore.QRectF(self.rect()).adjusted(
+            0.5,
+            self._TOP + 0.5,
+            -0.5,
+            -0.5,
+        )
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QtGui.QColor(COLORS["bg_card"]))
+        painter.drawRoundedRect(rect, self._RADIUS, self._RADIUS)
+
+        font = self.font()
+        font.setFamily(FONT_SANS)
+        font.setPointSize(8)
+        font.setWeight(QtGui.QFont.Weight.Medium)
+        font.setLetterSpacing(QtGui.QFont.SpacingType.AbsoluteSpacing, 0.8)
+        metrics = QtGui.QFontMetrics(font)
+        title_width = float(metrics.horizontalAdvance(self._title))
+        gap_left = self._TITLE_LEFT - self._TITLE_PADDING
+        gap_right = self._TITLE_LEFT + title_width + self._TITLE_PADDING
+
+        left = rect.left()
+        right = rect.right()
+        top = rect.top()
+        bottom = rect.bottom()
+        radius = min(self._RADIUS, rect.width() / 2.0, rect.height() / 2.0)
+        border = QtGui.QPainterPath()
+        border.moveTo(gap_right, top)
+        border.lineTo(right - radius, top)
+        border.quadTo(right, top, right, top + radius)
+        border.lineTo(right, bottom - radius)
+        border.quadTo(right, bottom, right - radius, bottom)
+        border.lineTo(left + radius, bottom)
+        border.quadTo(left, bottom, left, bottom - radius)
+        border.lineTo(left, top + radius)
+        border.quadTo(left, top, left + radius, top)
+        border.lineTo(gap_left, top)
+        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["border_hi"]), 1.0))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(border)
+
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(COLORS["text_dim"]))
+        painter.drawText(
+            QtCore.QRectF(
+                self._TITLE_LEFT,
+                0.0,
+                title_width + 2.0,
+                self._TOP * 2.0,
+            ),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            self._title,
+        )
+
+
 class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1012,6 +1821,7 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         title.sig_close.connect(self.reject)
         title.btn_settings.hide()
         title.btn_account.hide()
+        title.btn_close.setFocusPolicy(Qt.NoFocus)
         root.addWidget(title)
 
         body = QtWidgets.QWidget()
@@ -1021,64 +1831,74 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         body_lay.setSpacing(16)
 
         # ── SERVER group ───────────────────────────────────────────────────
-        grp_server = QtWidgets.QGroupBox("ACCOUNT")
-        f1 = QtWidgets.QFormLayout(grp_server)
-        f1.setSpacing(10)
+        grp_server = _SettingsGroup("ACCOUNT")
+        f1 = QtWidgets.QVBoxLayout(grp_server)
+        f1.setContentsMargins(12, 20, 12, 12)
+        f1.setSpacing(2)
 
         self.lbl_token_status = QtWidgets.QLabel("")
         self.lbl_token_status.setObjectName("hintLabel")
-        self.cmb_account = QtWidgets.QComboBox()
+        self.cmb_account = _SettingsComboBox()
         self.cmb_account.currentIndexChanged.connect(self._account_changed)
-        self.btn_browser_signin = OutlinedButton("Sign in with browser", primary=False)
+        self.btn_browser_signin = OutlinedButton(
+            "Sign in with browser", primary=False, variant="neutral"
+        )
         self.btn_browser_signin.clicked.connect(self._sign_in_with_browser)
 
-        f1.addRow("Active account",  self.cmb_account)
-        f1.addRow("",              self.lbl_token_status)
-        f1.addRow("",              self.btn_browser_signin)
+        f1.addWidget(_SettingsRow("Active account", self.cmb_account))
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setContentsMargins(10, 2, 10, 2)
+        status_row.addWidget(self.lbl_token_status)
+        f1.addLayout(status_row)
+        f1.addWidget(_SettingsRow("", self.btn_browser_signin))
         body_lay.addWidget(grp_server)
 
         # ── ANALYSIS group ─────────────────────────────────────────────────
-        grp_an = QtWidgets.QGroupBox("ANALYSIS")
-        f2 = QtWidgets.QFormLayout(grp_an)
-        f2.setSpacing(10)
+        grp_an = _SettingsGroup("ANALYSIS")
+        f2 = QtWidgets.QVBoxLayout(grp_an)
+        f2.setContentsMargins(12, 20, 12, 12)
+        f2.setSpacing(2)
 
-        self.chk_limit_depth = QtWidgets.QCheckBox("Limit max call depth")
-        self.spin_depth = QtWidgets.QSpinBox()
+        self.chk_limit_depth = QtWidgets.QCheckBox()
+        self.chk_guess_virtual_calls = QtWidgets.QCheckBox()
+        self.spin_depth = _SettingsSpinBox()
         self.spin_depth.setRange(1, 10)
         self.chk_limit_depth.toggled.connect(self.spin_depth.setEnabled)
 
-        self.chk_renames = QtWidgets.QCheckBox("Apply renames")
-        self.chk_types   = QtWidgets.QCheckBox("Apply struct member type changes")
-        self.chk_structs = QtWidgets.QCheckBox("Create new structures")
-        self.cmb_rename_style = QtWidgets.QComboBox()
+        self.chk_renames = QtWidgets.QCheckBox()
+        self.chk_types   = QtWidgets.QCheckBox()
+        self.chk_structs = QtWidgets.QCheckBox()
+        self.cmb_rename_style = _SettingsComboBox()
         self.cmb_rename_style.addItem("snake_case", "snake_case")
         self.cmb_rename_style.addItem("camelCase", "camelCase")
         self.cmb_rename_style.addItem("PascalCase", "PascalCase")
         self.cmb_rename_style.setToolTip("Preferred style for function, global, local, and parameter renames.")
-        self.cmb_struct_member_style = QtWidgets.QComboBox()
+        self.cmb_struct_member_style = _SettingsComboBox()
         self.cmb_struct_member_style.addItem("Default", "default")
         self.cmb_struct_member_style.addItem("m_ prefix", "m_prefix")
         self.cmb_struct_member_style.addItem("typed m_ prefix", "typed_m_prefix")
         self.cmb_struct_member_style.setToolTip("Preferred style for structure member names.")
 
-        f2.addRow("", self.chk_limit_depth)
-        f2.addRow("Max call depth", self.spin_depth)
-        f2.addRow("Rename style", self.cmb_rename_style)
-        f2.addRow("Struct member style", self.cmb_struct_member_style)
-        f2.addRow("", self.chk_renames)
-        f2.addRow("", self.chk_types)
-        f2.addRow("", self.chk_structs)
+        f2.addWidget(_SettingsRow("Limit max call depth", self.chk_limit_depth, fixed_control_width=False))
+        f2.addWidget(_SettingsRow("Max call depth", self.spin_depth))
+        f2.addWidget(_SettingsRow("Guess virtual function calls", self.chk_guess_virtual_calls, fixed_control_width=False))
+        f2.addWidget(_SettingsRow("Rename style", self.cmb_rename_style))
+        f2.addWidget(_SettingsRow("Struct member style", self.cmb_struct_member_style))
+        f2.addWidget(_SettingsRow("Apply renames", self.chk_renames, fixed_control_width=False))
+        f2.addWidget(_SettingsRow("Apply struct member type changes", self.chk_types, fixed_control_width=False))
+        f2.addWidget(_SettingsRow("Create new structures", self.chk_structs, fixed_control_width=False))
         body_lay.addWidget(grp_an)
 
         # ── APPEARANCE group ───────────────────────────────────────────────
-        grp_ap = QtWidgets.QGroupBox("APPEARANCE")
-        f3 = QtWidgets.QFormLayout(grp_ap)
-        f3.setSpacing(10)
-        self.cmb_theme = QtWidgets.QComboBox()
+        grp_ap = _SettingsGroup("APPEARANCE")
+        f3 = QtWidgets.QVBoxLayout(grp_ap)
+        f3.setContentsMargins(12, 20, 12, 12)
+        f3.setSpacing(2)
+        self.cmb_theme = _SettingsComboBox()
         for _name in theme_names():
             self.cmb_theme.addItem(_name)
         self.cmb_theme.setToolTip("Colour theme — applied on Save")
-        f3.addRow("Theme", self.cmb_theme)
+        f3.addWidget(_SettingsRow("Theme", self.cmb_theme))
         body_lay.addWidget(grp_ap)
 
         row = QtWidgets.QHBoxLayout()
@@ -1087,6 +1907,9 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         cancel.clicked.connect(self.reject)
         ok = OutlinedButton("Save", primary=True)
         ok.clicked.connect(self._on_ok)
+        button_size = cancel.sizeHint().expandedTo(ok.sizeHint())
+        cancel.setFixedSize(button_size)
+        ok.setFixedSize(button_size)
         row.addWidget(cancel)
         row.addWidget(ok)
         body_lay.addLayout(row)
@@ -1100,6 +1923,9 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self.spin_depth.setValue(max_call_depth if limit_call_depth else 2)
         self.chk_limit_depth.setChecked(limit_call_depth)
         self.spin_depth.setEnabled(limit_call_depth)
+        self.chk_guess_virtual_calls.setChecked(
+            s.get("guess_virtual_function_calls", False)
+        )
         self.chk_renames.setChecked(s.get("auto_renames", True))
         self.chk_types.setChecked(s.get("auto_types", True))
         self.chk_structs.setChecked(s.get("auto_structs", True))
@@ -1237,6 +2063,7 @@ class SettingsDialog(RoundedDialogMixin, QtWidgets.QDialog):
                 if self.chk_limit_depth.isChecked()
                 else 0
             ),
+            "guess_virtual_function_calls": self.chk_guess_virtual_calls.isChecked(),
             "auto_renames":         self.chk_renames.isChecked(),
             "auto_types":           self.chk_types.isChecked(),
             "auto_structs":         self.chk_structs.isChecked(),
@@ -2158,6 +2985,7 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
         super().__init__(parent)
         self._groups: dict[str, dict] = {}
         self._order: list[str] = []
+        self._standalone_counter = 0
         self._layout_width = -1
         self._content_height = 0
         self._layout_refresh_pending = False
@@ -2237,16 +3065,48 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
             if not isinstance(items, list):
                 items = []
 
-            key = function_ea or f"program:{function_name or 'updates'}"
+            detail_lines = []
+            if detail:
+                detail_lines.append(detail)
+            detail_lines.extend(
+                str(item).strip()
+                for item in items
+                if str(item).strip()
+            )
+
+            # Activities without a function address are chronological agent or
+            # program-wide events, not one synthetic function history. Keep
+            # each event independent and put the newest one first.
+            if not function_ea:
+                key = f"standalone:{self._standalone_counter}"
+                self._standalone_counter += 1
+                self._groups[key] = {
+                    "ea": "",
+                    "name": label,
+                    "parent": "",
+                    "status": status or "done",
+                    "context": "\n".join(detail_lines),
+                    "actions": [],
+                    "standalone": True,
+                    "layout": None,
+                    "y": 0,
+                }
+                self._order.insert(0, key)
+                dirty.add(key)
+                added += 1
+                continue
+
+            key = function_ea
             group = self._groups.get(key)
             if group is None:
                 group = {
                     "ea": function_ea,
-                    "name": function_name or function_ea or "Program updates",
+                    "name": function_name or function_ea,
                     "parent": "",
                     "status": "active",
                     "context": "",
                     "actions": [],
+                    "standalone": False,
                     "layout": None,
                     "y": 0,
                 }
@@ -2261,14 +3121,6 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
                 group["status"] = "active"
                 group["context"] = detail
             else:
-                detail_lines = []
-                if detail:
-                    detail_lines.append(detail)
-                detail_lines.extend(
-                    str(item).strip()
-                    for item in items
-                    if str(item).strip()
-                )
                 group["actions"].append(
                     {
                         "kind": action,
@@ -2292,7 +3144,7 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
             "failed": "Could not analyse",
             "skipped": "Skipped",
         }.get(group["status"], "Investigating")
-        if not group["ea"] and group["name"] == "Program updates":
+        if group.get("standalone"):
             return group["name"]
         return f"{prefix} {group['name']}"
 
@@ -2511,11 +3363,14 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
             if group_y > clip_bottom:
                 break
 
-            status_color = {
-                "done": "done",
-                "failed": "failed",
-                "skipped": "text_mute",
-            }.get(group["status"], "accent")
+            if group.get("standalone"):
+                status_color = "accent"
+            else:
+                status_color = {
+                    "done": "done",
+                    "failed": "failed",
+                    "skipped": "text_mute",
+                }.get(group["status"], "accent")
             header_pen = QtGui.QPen(
                 QtGui.QColor(COLORS[status_color]),
                 2,
@@ -2683,7 +3538,7 @@ class WorkingWidget(QtWidgets.QWidget):
         elif self._mode == "thinking":
             _initial_text = "Generating report…"
         else:
-            _initial_text = "Reversing..."
+            _initial_text = "Initialising..."
         self._shimmer = ShimmerTextLabel(_initial_text)
         self._shimmer.set_active(True)
         lay.addWidget(self._shimmer)
@@ -2885,6 +3740,7 @@ class WorkingLogPane(QtWidgets.QWidget):
 
         self._scroll = QtWidgets.QScrollArea(self._reveal_viewport)
         self._scroll.setObjectName("workingActivityPane")
+        install_scrollbars(self._scroll, "bg_elev")
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -3963,6 +4819,8 @@ class CodeBlockWidget(QtWidgets.QFrame):
         header_lay.addWidget(self._copy_btn)
 
         self._code_view = QtWidgets.QTextEdit()
+        self._code_view.setObjectName("markdownCodeView")
+        install_scrollbars(self._code_view, "bg_input")
         self._code_view.setReadOnly(True)
         self._code_view.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._code_view.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
@@ -4003,7 +4861,7 @@ class CodeBlockWidget(QtWidgets.QFrame):
             f"QPushButton:hover {{ color: {COLORS['accent']}; border-color: {COLORS['accent']}; }}"
         )
         self._code_view.setStyleSheet(
-            f"QTextEdit {{ background: {COLORS['bg_input']}; color: {COLORS['text']};"
+            f"QTextEdit#markdownCodeView {{ background: {COLORS['bg_input']}; color: {COLORS['text']};"
             f" border: none; selection-background-color: {COLORS['accent']};"
             f" font-family: {FONT_MONO}; font-size: 12px; }}"
         )
@@ -4330,11 +5188,6 @@ class UsageLimitWidget(QtWidgets.QFrame):
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
         c = COLORS
-        rect = QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        p.setBrush(QtGui.QColor(c["bg_input"]))
-        p.setPen(QtGui.QPen(QtGui.QColor(c["border_hi"]), 1))
-        p.drawRoundedRect(rect, 8, 8)
-
         self._draw_arc(p, QtCore.QPointF(16, 16), 10, self._month_pct, c["accent"], 3)
         font = QtGui.QFont(FONT_SANS)
         font.setPixelSize(7 if len(self._month_value) >= 4 else 8)
@@ -4832,6 +5685,7 @@ class ConversationDrawer(QtWidgets.QFrame):
 
         self._session_list = QtWidgets.QListWidget()
         self._session_list.setObjectName("sessionList")
+        install_scrollbars(self._session_list, "bg_elev")
         self._session_list.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._session_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -5456,29 +6310,18 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
         tgt_row = QtWidgets.QHBoxLayout()
         self.target_pill = TargetPill()
-        self.target_pill.sig_refresh.connect(self._refresh_target)
         tgt_row.addWidget(self.target_pill)
         tgt_row.addStretch(1)
-
-        # Model tier combo — shown in the compact view
-        self.cmb_model_tier = QtWidgets.QComboBox()
-        for label, _value in _MODEL_TIER_OPTIONS:
-            self.cmb_model_tier.addItem(label)
-        self.cmb_model_tier.setCurrentIndex(
-            _tier_label_for(g_settings.get("model_tier", "fast"))
-        )
-        self.cmb_model_tier.currentIndexChanged.connect(self._on_model_tier_changed)
-        self.cmb_model_tier.setToolTip(
-            "LLM tier for this analysis.\n"
-            "Fast: fast model throughout.\n"
-            "Dynamic: fast model for reversal, smart model for the final answer.\n"
-            "Smart: smart model throughout."
-        )
-        tgt_row.addWidget(self.cmb_model_tier)
         cb.addLayout(tgt_row)
 
-        self.prompt_input = QtWidgets.QTextEdit()
-        self.prompt_input.setObjectName("promptInput")
+        model_tier = g_settings.get("model_tier", "fast")
+        reasoning_level = g_settings.get("agent_reasoning_level", "high")
+        self.prompt_input = _AgentPromptEdit(
+            "promptInput",
+            model_tier,
+            reasoning_level,
+        )
+        self.prompt_input.profile_changed.connect(self._on_model_effort_changed)
         self.prompt_input.setPlaceholderText(
             "What do you want to know about this binary?"
         )
@@ -5582,10 +6425,6 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         )
 
         # ── Right panel: log on top, chat on bottom (Layout B) ────────────
-        # NB: chat-scroll + working-log scrollbars are styled in main_qss()
-        # (scoped by object name).  Styling a QAbstractScrollArea's scrollbar
-        # by calling setStyleSheet() on the bare scrollbar widget leaves the
-        # handle unrendered — the rules must cascade from an ancestor sheet.
         self.log_panel = QtWidgets.QFrame()
         self.log_panel.setObjectName("logPanel")
         # Dynamically sized via the splitter — keep a sensible floor so the
@@ -5598,6 +6437,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         # ── Chat thread scroll area ────────────────────────────────────────
         self._chat_scroll = QtWidgets.QScrollArea()
         self._chat_scroll.setObjectName("chatScroll")
+        install_scrollbars(self._chat_scroll, "bg_elev")
         self._chat_scroll.setWidgetResizable(True)
         self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._chat_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -5610,6 +6450,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
         self._chat_container = QtWidgets.QWidget()
         self._chat_container.setObjectName("chatContainer")
+        self._register_chat_wheel_surface(self._chat_container)
         self._thread_lay = QtWidgets.QVBoxLayout(self._chat_container)
         self._thread_lay.setContentsMargins(0, 8, 0, 8)
         self._thread_lay.setSpacing(2)
@@ -5621,27 +6462,44 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         # ── Always-visible input row ───────────────────────────────────────
         _input_frame = QtWidgets.QFrame()
         _input_frame.setObjectName("chatInputRow")
-        _if_lay = QtWidgets.QHBoxLayout(_input_frame)
-        _if_lay.setContentsMargins(8, 8, 8, 8)
-        _if_lay.setSpacing(6)
-        self.chat_input = QtWidgets.QLineEdit()
-        self.chat_input.setObjectName("chatInput")
+        _if_lay = QtWidgets.QVBoxLayout(_input_frame)
+        _if_lay.setContentsMargins(10, 8, 10, 10)
+        _if_lay.setSpacing(0)
+
+        self.chat_composer = QtWidgets.QFrame()
+        self.chat_composer.setObjectName("chatComposer")
+        _composer_lay = QtWidgets.QVBoxLayout(self.chat_composer)
+        _composer_lay.setContentsMargins(11, 9, 8, 8)
+        _composer_lay.setSpacing(3)
+        self.chat_input = _AgentPromptEdit(
+            "chatInput",
+            model_tier,
+            reasoning_level,
+        )
+        self.chat_input.profile_changed.connect(self._on_model_effort_changed)
         self.chat_input.setPlaceholderText("Ask a question…")
+        self.chat_input.set_dynamic_height_range(52, 104)
         self.chat_input.installEventFilter(self)
         self.chat_input.setEnabled(False)
-        self.btn_send_chat = OutlinedButton("Send", primary=True)
+        composer_selector = self.chat_input.detach_profile_selector()
+
+        self.btn_send_chat = _ChatSendButton()
         self.btn_send_chat.clicked.connect(self._send_chat_message)
         self.btn_send_chat.setEnabled(False)
         self.usage_limit = UsageLimitWidget()
         self.usage_limit.setEnabled(True)
-        _if_lay.addWidget(self.chat_input, 1)
-        _if_lay.addWidget(self.btn_send_chat)
-        _if_lay.addWidget(self.usage_limit)
-        lp.addWidget(_input_frame)
+        _composer_lay.addWidget(self.chat_input)
+        _composer_controls = QtWidgets.QHBoxLayout()
+        _composer_controls.setContentsMargins(0, 0, 0, 0)
+        _composer_controls.setSpacing(5)
+        _composer_controls.addStretch(1)
+        _composer_controls.addWidget(self.usage_limit, 0, Qt.AlignVCenter)
+        _composer_controls.addWidget(composer_selector, 0, Qt.AlignVCenter)
+        _composer_controls.addWidget(self.btn_send_chat, 0, Qt.AlignVCenter)
+        _composer_lay.addLayout(_composer_controls)
 
-        # Let the splitter handle blend its lower portion into this row so the
-        # row's dark box reads as flush to the divider (no left-poking strip).
-        self._main_splitter.input_row = _input_frame
+        _if_lay.addWidget(self.chat_composer)
+        lp.addWidget(_input_frame)
 
         self._main_splitter.addWidget(self.log_panel)
         # Graph soaks up extra width on resize; the log keeps its dragged size.
@@ -5675,10 +6533,22 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         overlay.sync_geometry()
 
     # ─── Target & settings ───────────────────────────────────────────────
-    def _on_model_tier_changed(self, idx: int):
-        if 0 <= idx < len(_MODEL_TIER_OPTIONS):
-            _label, value = _MODEL_TIER_OPTIONS[idx]
-            g_settings["model_tier"] = value
+    def _on_model_effort_changed(
+        self,
+        model_tier: str,
+        reasoning_level: str,
+    ) -> None:
+        changed = (
+            g_settings.get("model_tier") != model_tier
+            or g_settings.get("agent_reasoning_level") != reasoning_level
+        )
+        g_settings["model_tier"] = model_tier
+        g_settings["agent_reasoning_level"] = reasoning_level
+        for editor_name in ("prompt_input", "chat_input"):
+            editor = getattr(self, editor_name, None)
+            if editor is not None:
+                editor.set_model_effort(model_tier, reasoning_level)
+        if changed:
             save_settings()
 
     def _refresh_target(self):
@@ -6079,11 +6949,13 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             self._disconnect_worker(self._active_entry.worker)
 
         model_tier = g_settings.get("model_tier", "fast")
+        agent_reasoning_level = g_settings.get("agent_reasoning_level", "high")
         current_view = dict(self._current_view)
         worker = AnalysisWorker(
             self._ea,
             prompt,
             model_tier=model_tier,
+            agent_reasoning_level=agent_reasoning_level,
             current_view=current_view,
         )
         entry = _SessionEntry(prompt, worker)
@@ -6110,8 +6982,8 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
     def _stop_analysis(self):
         if self._active_entry:
-            self._active_entry.worker.cancel()
-        self.title_bar.set_dot_color("failed")
+            self._active_entry.worker.cancel_operation()
+            self.btn_cancel.setEnabled(False)
 
     def _on_esc(self):
         _w = self._active_entry.worker if self._active_entry else None
@@ -6559,6 +7431,8 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         animates, so the header stays completely stationary during expand/collapse."""
         w  = WorkingWidget(mode=mode)
         lp = WorkingLogPane(header=w)   # also sets w._log_pane_ref = lp
+        self._register_chat_wheel_surface(w)
+        self._register_chat_wheel_surface(lp)
         w.sig_toggle.connect(lp.toggle_expand)
         self._current_working  = w
         self._current_log_pane = lp
@@ -6584,9 +7458,15 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
 
     def _add_thread_widget(self, widget: QtWidgets.QWidget) -> None:
         """Insert a widget before the bottom stretch in the chat thread."""
+        self._register_chat_wheel_surface(widget)
         idx = self._thread_lay.count() - 1   # stretch is always the last item
         self._thread_lay.insertWidget(idx, widget)
         self._schedule_scroll_to_bottom()
+
+    def _register_chat_wheel_surface(self, widget: QtWidgets.QWidget) -> None:
+        """Let wheel events over a chat widget's empty margins scroll the thread."""
+        widget.setProperty("decompileChatWheelSurface", True)
+        widget.installEventFilter(self)
 
     def _on_chat_scroll_value_changed(self, value: int) -> None:
         if self._chat_scroll_programmatic:
@@ -6641,10 +7521,69 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             self._active_entry.messages.append(("AI", message))
 
         self._set_chat_controls_enabled(True)
+        self.btn_cancel.hide()
+        self.btn_cancel.setEnabled(True)
+        self._refresh_usage()
+
+    def _on_operation_cancelled(self, message: str) -> None:
+        self._finish_operation_early(
+            message,
+            fallback="Generation stopped.",
+            title="stopped",
+            status="done",
+            dot_color="done",
+        )
+
+    def _on_operation_interrupted(self, message: str) -> None:
+        self._finish_operation_early(
+            message,
+            fallback="Generation was interrupted. You can send another message to continue.",
+            title="interrupted",
+            status="interrupted",
+            dot_color="failed",
+        )
+
+    def _finish_operation_early(
+        self,
+        message: str,
+        *,
+        fallback: str,
+        title: str,
+        status: str,
+        dot_color: str,
+    ) -> None:
+        if self._shutting_down:
+            return
+        self._flush_reversal_activity()
+        result_message = message.strip() or fallback
+        self.title_bar.set_dot_color(dot_color)
+        self.title_bar.set_title(f"Decompile.re — {title}")
+        self.btn_cancel.hide()
+        self.btn_cancel.setEnabled(True)
+
+        if self._current_working and self._start_ts:
+            self._current_working.mark_done(self._start_ts.elapsed())
+        self._current_working = None
+        self._current_log_pane = None
+        self._final_answer_log_pane = None
+
+        if self._streaming_widget:
+            self._streaming_widget.replace_text(result_message)
+            self._streaming_widget.finalize()
+            self._streaming_widget = None
+        else:
+            self._add_thread_widget(ChatMessageWidget("AI", result_message))
+
+        if self._active_entry:
+            self._active_entry.messages.append(("AI", result_message))
+            self._active_entry.is_done = True
+            self._active_entry.session_status = status
+
+        self._show_chat_panel()
         self._refresh_usage()
 
     def _send_chat_message(self) -> None:
-        msg = self.chat_input.text().strip()
+        msg = self.chat_input.toPlainText().strip()
         if msg:
             self.chat_input.clear()
             self._do_send_chat(msg)
@@ -6656,6 +7595,8 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         if entry in self._chat_send_jobs:
             return
         self._set_chat_controls_enabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.show()
 
         # Record before sending so the message is captured even on error
         entry.messages.append(("You", msg))
@@ -6669,7 +7610,13 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self._start_ts.start()
 
         thread = QtCore.QThread(self)
-        worker = _SendChatWorker(entry, msg, dict(self._current_view))
+        worker = _SendChatWorker(
+            entry,
+            msg,
+            dict(self._current_view),
+            g_settings.get("model_tier", "fast"),
+            g_settings.get("agent_reasoning_level", "high"),
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.sig_error.connect(self._chat_send_failed)
@@ -6690,13 +7637,26 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         if self._current_log_pane:
             self._current_log_pane.append_log("error", f"Send error: {message}")
             self._current_log_pane.toggle_expand()
+        self.btn_cancel.hide()
+        self.btn_cancel.setEnabled(True)
         self._current_working = None
         self._current_log_pane = None
         self._set_chat_controls_enabled(True)
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         """Send chat message on Enter; let Shift+Enter pass through."""
-        if obj is self.chat_input and event.type() == QtCore.QEvent.KeyPress:
+        if (
+            event.type() == QtCore.QEvent.Wheel
+            and bool(obj.property("decompileChatWheelSurface"))
+        ):
+            self._chat_scroll.wheelEvent(event)
+            return True
+        chat_input = getattr(self, "chat_input", None)
+        if (
+            chat_input is not None
+            and obj is chat_input
+            and event.type() == QtCore.QEvent.KeyPress
+        ):
             key = event.key()
             if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                 if not (event.modifiers() & QtCore.Qt.ShiftModifier):
@@ -6714,6 +7674,8 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         worker.sig_tree_nodes_added.connect(self._on_tree_nodes_added)
         worker.sig_tree_node_updated.connect(self.graph_view.update_node)
         worker.sig_chat_response.connect(self._on_chat_response)
+        worker.sig_operation_cancelled.connect(self._on_operation_cancelled)
+        worker.sig_operation_interrupted.connect(self._on_operation_interrupted)
         worker.sig_stream_start.connect(self._on_stream_start)
         worker.sig_stream_chunk.connect(self._on_stream_chunk)
         worker.sig_candidate_answer_replace.connect(self._on_candidate_answer_replace)
@@ -6738,6 +7700,8 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             (worker.sig_tree_nodes_added, self._on_tree_nodes_added),
             (worker.sig_tree_node_updated, self.graph_view.update_node),
             (worker.sig_chat_response,    self._on_chat_response),
+            (worker.sig_operation_cancelled, self._on_operation_cancelled),
+            (worker.sig_operation_interrupted, self._on_operation_interrupted),
             (worker.sig_stream_start,     self._on_stream_start),
             (worker.sig_stream_chunk,     self._on_stream_chunk),
             (worker.sig_candidate_answer_replace, self._on_candidate_answer_replace),
@@ -6887,7 +7851,9 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self._schedule_scroll_to_bottom(force=True)
 
         if entry.is_done:
-            failed = entry.session_status in ("error", "failed", "cancelled")
+            failed = entry.session_status in (
+                "error", "failed", "cancelled", "interrupted",
+            )
             self.title_bar.set_dot_color("failed" if failed else "done")
             self.title_bar.set_title(
                 "Decompile.re — " + (entry.session_status or "done")
