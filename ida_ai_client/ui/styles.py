@@ -343,11 +343,11 @@ def main_qss() -> str:
         color: {c['text']};
     }}
     QMenu#modelEffortMenu::item:selected {{
-        background: {c['bg_card_hi']};
+        background: transparent;
         color: transparent;
     }}
     QMenu#modelEffortSubmenu::item:selected {{
-        background: {c['bg_card_hi']};
+        background: transparent;
         color: {c['accent_hi']};
     }}
     QMenu#modelEffortMenu::right-arrow {{

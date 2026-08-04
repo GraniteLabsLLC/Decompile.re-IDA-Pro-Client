@@ -446,6 +446,7 @@ else:
 
 class _RoundedPopupMenu(_QMenuBase):
     _RADIUS = 9.0
+    _ITEM_INSET = 6.0
 
     def __init__(self, object_name: str, parent=None):
         super().__init__(parent)
@@ -486,6 +487,19 @@ class _RoundedPopupMenu(_QMenuBase):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QtGui.QColor(COLORS["bg_card"]))
         painter.drawRoundedRect(rect, self._RADIUS, self._RADIUS)
+
+        active_action = self.activeAction()
+        if active_action is not None and active_action.isEnabled():
+            active_rect = self.actionGeometry(active_action)
+            if not active_rect.isEmpty():
+                highlight = QtCore.QRectF(
+                    self._ITEM_INSET,
+                    active_rect.top(),
+                    max(0.0, self.width() - (2.0 * self._ITEM_INSET)),
+                    active_rect.height(),
+                )
+                painter.setBrush(QtGui.QColor(COLORS["bg_card_hi"]))
+                painter.drawRoundedRect(highlight, 6.0, 6.0)
 
         painter.end()
 
@@ -2611,6 +2625,10 @@ def _paint_activity_icon(
         painter.drawEllipse(QtCore.QRectF(6.5, 6.5, 8.5, 8.5))
         painter.drawLine(QtCore.QPointF(14.0, 14.0), QtCore.QPointF(18.0, 18.0))
         painter.drawLine(QtCore.QPointF(9.0, 10.8), QtCore.QPointF(12.5, 10.8))
+    elif kind == "web_search":
+        painter.drawEllipse(QtCore.QRectF(6.5, 6.5, 11.0, 11.0))
+        painter.drawEllipse(QtCore.QRectF(9.25, 6.5, 5.5, 11.0))
+        painter.drawLine(QtCore.QPointF(6.75, 12.0), QtCore.QPointF(17.25, 12.0))
     elif kind in _ACTIVITY_RENAME_KINDS:
         _draw_pencil_glyph(painter, QtCore.QPointF(12.0, 12.0))
     elif kind == "refining":
@@ -4995,6 +5013,17 @@ class MarkdownContentWidget(QtWidgets.QWidget):
             f"color: {COLORS['text']}; font-family: {FONT_SANS}; font-size: 13px;"
             f" background: transparent; line-height: 1.6;"
         )
+
+        palette = label.palette()
+        color_roles = getattr(QtGui.QPalette, "ColorRole", QtGui.QPalette)
+        link_role = getattr(color_roles, "Link", None)
+        visited_role = getattr(color_roles, "LinkVisited", None)
+        link_color = QtGui.QColor(COLORS["accent"])
+        if link_role is not None:
+            palette.setColor(link_role, link_color)
+        if visited_role is not None:
+            palette.setColor(visited_role, link_color)
+        label.setPalette(palette)
 
     def _make_code_fallback_label(self, code: str) -> QtWidgets.QLabel:
         label = QtWidgets.QLabel()
