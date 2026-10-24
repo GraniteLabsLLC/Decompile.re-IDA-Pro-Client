@@ -11,12 +11,17 @@ import re
 import shutil
 import subprocess
 import tempfile
+from bisect import bisect_right
 
 import idc
 import idaapi
+import ida_bytes
 import ida_funcs
 import ida_hexrays
 import ida_lines
+import ida_nalt
+import ida_typeinf
+import ida_ua
 import idautils
 
 from .ida.navigation import get_function_code, get_pseudocode, get_disassembly, get_function_name, find_function_by_name, get_bytes, get_function_global_references, build_call_tree, scan_exports, find_string_xrefs, pdb_symbols_loaded
@@ -199,6 +204,99 @@ def _get_bytes(cmd: dict) -> dict:
     return {"type": "bytes_result", "hex": raw.hex() if raw else ""}
 
 
+def _get_disassembly_context(cmd: dict) -> dict:
+    requested = _parse_ea(str(cmd.get("address") or ""))
+    if requested is None:
+        raise ValueError("address must be hexadecimal")
+    mode = str(cmd.get("mode") or "canonical").strip().lower()
+    if mode == "exact":
+        if "instructions_before" in cmd or "instructions_after" in cmd:
+            raise ValueError(
+                "instructions_before and instructions_after are only valid in canonical mode"
+            )
+        count = int(cmd.get("instruction_count", 16))
+        if count < 1 or count > 256:
+            raise ValueError("invalid exact disassembly instruction count")
+        function = ida_funcs.get_func(requested)
+        function_address = int(function.start_ea) if function is not None else None
+        instructions = []
+        address = requested
+        for _ in range(count):
+            instruction = ida_ua.insn_t()
+            size = int(ida_ua.decode_insn(instruction, address) or 0)
+            if size < 1:
+                raise ValueError(f"could not decode instruction at {address:#x}")
+            raw = get_bytes(address, size)
+            if raw is None or len(raw) != size:
+                raise ValueError(f"could not read instruction bytes at {address:#x}")
+            assembly = ida_lines.tag_remove(
+                ida_lines.generate_disasm_line(address, ida_lines.GENDSM_FORCE_CODE) or ""
+            )
+            if not assembly:
+                raise ValueError(f"could not format instruction at {address:#x}")
+            instructions.append({
+                "address": hex(address),
+                "bytes": raw.hex(" ").upper(),
+                "assembly": assembly,
+            })
+            address += size
+        return {
+            "type": "disassembly_result",
+            "mode": "exact",
+            "requested_address": hex(requested),
+            "resolved_address": hex(requested),
+            "function_name": (
+                get_function_name(function_address) if function_address is not None else ""
+            ),
+            "function_address": hex(function_address) if function_address is not None else "",
+            "instructions": instructions,
+        }
+    if mode != "canonical":
+        raise ValueError("disassembly mode must be canonical or exact")
+    if "instruction_count" in cmd:
+        raise ValueError("instruction_count is only valid in exact mode")
+    before = int(cmd.get("instructions_before", 5))
+    after = int(cmd.get("instructions_after", 15))
+    if before < 0 or after < 0 or before + after + 1 > 256:
+        raise ValueError("invalid disassembly instruction count")
+
+    function = ida_funcs.get_func(requested)
+    if function is None:
+        raise ValueError(f"no function contains address {requested:#x}")
+    addresses = sorted({int(ea) for ea in idautils.FuncItems(int(function.start_ea))})
+    if not addresses:
+        raise ValueError(f"function at {int(function.start_ea):#x} has no instructions")
+
+    index = bisect_right(addresses, requested) - 1
+    if index < 0:
+        index = 0
+    resolved = addresses[index]
+    selected = addresses[max(0, index - before):index + after + 1]
+    instructions = []
+    for address in selected:
+        size = int(ida_bytes.get_item_size(address) or 0)
+        raw = get_bytes(address, size) if size > 0 else None
+        assembly = ida_lines.tag_remove(
+            idc.generate_disasm_line(address, 0) or ""
+        )
+        instructions.append({
+            "address": hex(address),
+            "bytes": raw.hex(" ").upper() if raw else "",
+            "assembly": assembly,
+        })
+
+    function_address = int(function.start_ea)
+    return {
+        "type": "disassembly_result",
+        "mode": "canonical",
+        "requested_address": hex(requested),
+        "resolved_address": hex(resolved),
+        "function_name": get_function_name(function_address) or "",
+        "function_address": hex(function_address),
+        "instructions": instructions,
+    }
+
+
 def _value_from_name(name: str) -> str:
     name = name or ""
     ea   = idc.get_name_ea_simple(name)
@@ -358,6 +456,7 @@ def _get_pseudocodes(cmd: dict) -> dict:
 
 _MAX_ANSWER_SEARCH_QUERIES = 16
 _MAX_ANSWER_SEARCH_RESULTS = 50
+_MAX_IMPORT_SEARCH_RESULTS = 100
 _MAX_STRING_SEARCH_PREVIEW = 512
 _MAX_TYPE_DECLARATION_PREVIEW = 4096
 
@@ -421,6 +520,178 @@ def _best_search_score(value: str, queries):
             rank = 2
         scores.append((rank, position, len(folded_value)))
     return (min(scores), folded_value) if scores else None
+
+
+def _import_search_request(cmd: dict):
+    raw_queries = cmd.get("queries", [])
+    if not isinstance(raw_queries, list):
+        return None, None, None, {
+            "type": "import_search_result",
+            "error": "queries must be a list",
+        }
+    queries = []
+    seen_queries = set()
+    for raw_query in raw_queries:
+        query = str(raw_query or "").strip().casefold()
+        if not query:
+            return None, None, None, {
+                "type": "import_search_result",
+                "error": "queries items must not be empty",
+            }
+        if query not in seen_queries:
+            seen_queries.add(query)
+            queries.append(query)
+    if len(queries) > _MAX_ANSWER_SEARCH_QUERIES:
+        return None, None, None, {
+            "type": "import_search_result",
+            "error": (
+                f"at most {_MAX_ANSWER_SEARCH_QUERIES} queries are allowed"
+            ),
+        }
+    try:
+        limit = int(cmd.get("limit", _MAX_IMPORT_SEARCH_RESULTS))
+        offset = int(cmd.get("offset", 0))
+    except (TypeError, ValueError):
+        limit = 0
+        offset = -1
+    if not 1 <= limit <= _MAX_IMPORT_SEARCH_RESULTS:
+        return None, None, None, {
+            "type": "import_search_result",
+            "error": (
+                "limit must be between 1 and "
+                f"{_MAX_IMPORT_SEARCH_RESULTS}"
+            ),
+        }
+    if offset < 0:
+        return None, None, None, {
+            "type": "import_search_result",
+            "error": "offset must not be negative",
+        }
+    return queries, limit, offset, None
+
+
+def _import_kind(address: int) -> str:
+    try:
+        type_info = ida_typeinf.tinfo_t()
+        if ida_nalt.get_tinfo(type_info, address):
+            if type_info.is_funcptr() or type_info.is_func():
+                return "function"
+            return "data"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _search_imports(cmd: dict) -> dict:
+    queries, limit, offset, error = _import_search_request(cmd)
+    if error is not None:
+        return error
+
+    matches = []
+    for module_index in range(int(ida_nalt.get_import_module_qty())):
+        module = str(ida_nalt.get_import_module_name(module_index) or "")
+
+        def collect(address, raw_name, raw_ordinal):
+            name = str(raw_name or "")
+            ordinal = int(raw_ordinal or 0)
+            display_name = name or (f"#{ordinal}" if ordinal else "")
+            searchable = [name, module, f"{module}!{display_name}"]
+            if ordinal:
+                searchable.append(f"#{ordinal}")
+            if queries:
+                scores = [
+                    score
+                    for value in searchable
+                    if value and (score := _best_search_score(value, queries))
+                ]
+                if not scores:
+                    return True
+                score = min(scores)
+            else:
+                score = ((3, 0, 0), "")
+            address = int(address)
+            matches.append((
+                score,
+                module.casefold(),
+                display_name.casefold(),
+                address,
+                {
+                    "module": module,
+                    "name": name,
+                    "address": hex(address),
+                    "ordinal": ordinal or None,
+                    "kind": _import_kind(address),
+                },
+            ))
+            return True
+
+        ida_nalt.enum_import_names(module_index, collect)
+
+    matches.sort(key=lambda item: item[:4])
+    total = len(matches)
+    imports = [item[4] for item in matches[offset:offset + limit]]
+    next_offset = offset + len(imports)
+    has_more = next_offset < total
+    return {
+        "type": "import_search_result",
+        "imports": imports,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
+    }
+
+
+def _search_optional_names(cmd, scan, result_type, result_key, name_keys):
+    raw_queries = cmd.get("queries", [])
+    if not isinstance(raw_queries, list):
+        return {"type": result_type, "error": "queries must be a list"}
+    if len(raw_queries) > _MAX_ANSWER_SEARCH_QUERIES:
+        return {
+            "type": result_type,
+            "error": f"at most {_MAX_ANSWER_SEARCH_QUERIES} queries are allowed",
+        }
+    queries = []
+    seen_queries = set()
+    for raw_query in raw_queries:
+        if not isinstance(raw_query, str) or not raw_query.strip():
+            return {
+                "type": result_type,
+                "error": "queries items must be non-empty strings",
+            }
+        query = raw_query.strip().casefold()
+        if query not in seen_queries:
+            seen_queries.add(query)
+            queries.append(query)
+
+    entries = scan(cmd)[result_key]
+    if queries:
+        matches = []
+        for entry in entries:
+            scores = [
+                score
+                for key in name_keys
+                if (score := _best_search_score(str(entry.get(key) or ""), queries))
+            ]
+            if scores:
+                matches.append((min(scores), entry))
+        matches.sort(key=lambda item: item[0])
+        entries = [entry for _score, entry in matches]
+    return {"type": result_type, result_key: entries}
+
+
+def _search_exports(cmd: dict) -> dict:
+    return _search_optional_names(
+        cmd, _scan_exports, "export_search_result", "exports",
+        ("name", "function_name"),
+    )
+
+
+def _search_vtables(cmd: dict) -> dict:
+    return _search_optional_names(
+        cmd, _scan_vtables, "vtable_search_result", "vtables", ("name",),
+    )
 
 
 def _search_strings(cmd: dict) -> dict:
@@ -534,7 +805,7 @@ def _get_xrefs(cmd: dict) -> dict:
 _DEFAULT_SUB_NAME = re.compile(r"^sub_[0-9A-Fa-f]+$")
 
 
-def _search_named_functions(cmd: dict) -> dict:
+def _search_functions_impl(cmd: dict, include_default_names: bool) -> dict:
     queries, limit, error = _bounded_search_request(
         cmd,
         "function_search_result",
@@ -545,7 +816,7 @@ def _search_named_functions(cmd: dict) -> dict:
     matches = []
     for ea in idautils.Functions():
         name = get_function_name(ea)
-        if _DEFAULT_SUB_NAME.fullmatch(name or ""):
+        if not include_default_names and _DEFAULT_SUB_NAME.fullmatch(name or ""):
             continue
         name = str(name or "")
         scored = _best_search_score(name, queries)
@@ -568,6 +839,14 @@ def _search_named_functions(cmd: dict) -> dict:
     return {"type": "function_search_result", "functions": functions}
 
 
+def _search_named_functions(cmd: dict) -> dict:
+    return _search_functions_impl(cmd, include_default_names=False)
+
+
+def _search_functions(cmd: dict) -> dict:
+    return _search_functions_impl(cmd, include_default_names=True)
+
+
 def _search_types(cmd: dict) -> dict:
     queries, limit, error = _bounded_search_request(
         cmd,
@@ -577,7 +856,12 @@ def _search_types(cmd: dict) -> dict:
         return error
 
     matches = []
-    for ordinal, name in idautils.Types():
+    type_library = ida_typeinf.get_idati()
+    ordinal_limit = int(ida_typeinf.get_ordinal_limit(type_library))
+    for ordinal in range(1, ordinal_limit):
+        name = ida_typeinf.get_numbered_type_name(type_library, ordinal)
+        if not name:
+            continue
         name = str(name or "")
         scored = _best_search_score(name, queries)
         if scored is not None:
@@ -1307,14 +1591,19 @@ _DISPATCH = {
     "get_function_name":        _get_function_name,
     "find_function_by_name":    _find_function_by_name,
     "get_bytes":                _get_bytes,
+    "get_disassembly":          _get_disassembly_context,
     "get_value_from_name":      _get_value_from_name,
     "get_data_batch":           _get_data_batch,
     "resolve_functions":        _resolve_functions,
     "get_pseudocodes":          _get_pseudocodes,
     "search_strings":           _search_strings,
     "search_global_names":      _search_global_names,
+    "search_imports":           _search_imports,
+    "search_exports":           _search_exports,
+    "search_vtables":           _search_vtables,
     "get_xrefs":                _get_xrefs,
     "search_named_functions":   _search_named_functions,
+    "search_functions":         _search_functions,
     "search_types":             _search_types,
     "get_entrypoints":          _get_entrypoints,
     "rename_function":          _rename_function,

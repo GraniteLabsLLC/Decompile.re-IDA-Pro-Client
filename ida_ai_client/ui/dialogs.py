@@ -99,6 +99,7 @@ _AGENT_REASONING_OPTIONS = [
     ("Medium", "medium"),
     ("High", "high"),
     ("Extra High", "extra_high"),
+    ("Max", "max"),
 ]
 
 
@@ -514,29 +515,81 @@ class _RoundedPopupMenu(_QMenuBase):
 
 
 class _ModelEffortSubmenu(_RoundedPopupMenu):
+    _LEFT_PADDING = 10.0
     _RIGHT_PADDING = 10.0
     _CHECK_WIDTH = 8.0
 
     def __init__(self, parent=None):
         super().__init__("modelEffortSubmenu", parent)
+        self._hovered_action = None
+        self.hovered.connect(self._on_action_hovered)
         if _NoMenuShadowStyle is not None:
             self._shadowless_style = _NoMenuShadowStyle()
             self._shadowless_style.setParent(self)
             self.setStyle(self._shadowless_style)
 
+    def _on_action_hovered(self, action) -> None:
+        if action is self._hovered_action:
+            return
+        self._hovered_action = action
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._hovered_action = None
+        self.update()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._hovered_action = None
+        super().hideEvent(event)
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        painter.setPen(QtGui.QPen(QtGui.QColor(COLORS["accent_hi"]), 1.35))
-        painter.setBrush(Qt.NoBrush)
+
+        hovered_action = self._hovered_action
+        if hovered_action is not None and hovered_action.isEnabled():
+            hovered_rect = self.actionGeometry(hovered_action)
+            if not hovered_rect.isEmpty():
+                highlight = QtCore.QRectF(
+                    self._ITEM_INSET,
+                    hovered_rect.top(),
+                    max(0.0, self.width() - (2.0 * self._ITEM_INSET)),
+                    hovered_rect.height(),
+                )
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QtGui.QColor(COLORS["bg_card_hi"]))
+                painter.drawRoundedRect(highlight, 6.0, 6.0)
 
         for action in self.actions():
-            if not action.isChecked():
-                continue
             rect = self.actionGeometry(action)
             if rect.isEmpty():
                 continue
+
+            highlighted = action is hovered_action or action.isChecked()
+            painter.setPen(
+                QtGui.QColor(
+                    COLORS["accent_hi"] if highlighted else COLORS["text"]
+                )
+            )
+            painter.setBrush(Qt.NoBrush)
+            painter.drawText(
+                QtCore.QRectF(rect).adjusted(
+                    self._LEFT_PADDING,
+                    0.0,
+                    -(self._RIGHT_PADDING + self._CHECK_WIDTH + 8.0),
+                    0.0,
+                ),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                action.text(),
+            )
+
+            if not action.isChecked():
+                continue
+            painter.setPen(
+                QtGui.QPen(QtGui.QColor(COLORS["accent_hi"]), 1.35)
+            )
             right = rect.right() - self._RIGHT_PADDING
             center_y = rect.center().y()
             path = QtGui.QPainterPath()
@@ -2616,6 +2669,9 @@ def _paint_activity_icon(
         "get_values_from_names",
         "search_strings",
         "search_global_names",
+        "search_imports",
+        "search_exports",
+        "search_vtables",
         "get_xrefs",
         "search_named_functions",
         "search_types",
@@ -3094,7 +3150,7 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
 
             # Activities without a function address are chronological agent or
             # program-wide events, not one synthetic function history. Keep
-            # each event independent and put the newest one first.
+            # each event independent and preserve arrival order.
             if not function_ea:
                 key = f"standalone:{self._standalone_counter}"
                 self._standalone_counter += 1
@@ -3109,7 +3165,7 @@ class _ReversalActivityTranscript(QtWidgets.QWidget):
                     "layout": None,
                     "y": 0,
                 }
-                self._order.insert(0, key)
+                self._order.append(key)
                 dirty.add(key)
                 added += 1
                 continue
@@ -6911,8 +6967,11 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             self.title_bar.set_update_busy(False)
 
     def _open_account_settings(self):
-        url = browser_auth.dashboard_url_for()
-        webbrowser.open(f"{url}/app/account", new=1, autoraise=True)
+        webbrowser.open(
+            browser_auth.account_url_for(),
+            new=1,
+            autoraise=True,
+        )
 
     def _open_settings(self):
         dlg = SettingsDialog(self)
@@ -6968,7 +7027,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
                 item.widget().deleteLater()
         self.graph_view.reset()
         self.title_bar.set_dot_color("analyzing")
-        self.title_bar.set_title("Decompile.re — running")
+        self.title_bar.set_title("Decompile.re")
 
         self._animate_to_expanded()
 
@@ -7378,7 +7437,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
             return
         self._flush_reversal_activity()
         self.title_bar.set_dot_color("done")
-        self.title_bar.set_title("Decompile.re — done")
+        self.title_bar.set_title("Decompile.re")
         self.btn_cancel.hide()
 
         clean_report = report.strip() or "Analysis complete — see IDA for applied changes."
@@ -7417,7 +7476,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self._final_answer_log_pane = None
         self._flush_reversal_activity()
         self.title_bar.set_dot_color("failed")
-        self.title_bar.set_title("Decompile.re — failed")
+        self.title_bar.set_title("Decompile.re")
         self.btn_cancel.hide()
         if self._active_entry:
             self._active_entry.is_done = True
@@ -7586,7 +7645,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
         self._flush_reversal_activity()
         result_message = message.strip() or fallback
         self.title_bar.set_dot_color(dot_color)
-        self.title_bar.set_title(f"Decompile.re — {title}")
+        self.title_bar.set_title("Decompile.re")
         self.btn_cancel.hide()
         self.btn_cancel.setEnabled(True)
 
@@ -7884,9 +7943,7 @@ class AnalysisDialog(RoundedDialogMixin, QtWidgets.QDialog):
                 "error", "failed", "cancelled", "interrupted",
             )
             self.title_bar.set_dot_color("failed" if failed else "done")
-            self.title_bar.set_title(
-                "Decompile.re — " + (entry.session_status or "done")
-            )
+            self.title_bar.set_title("Decompile.re")
             self.btn_cancel.hide()
             if entry.network_only:
                 self._set_chat_controls_enabled(False)

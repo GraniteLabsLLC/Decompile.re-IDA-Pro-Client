@@ -340,7 +340,7 @@ def main_qss() -> str:
         min-height: 20px;
         padding: 7px 28px 7px 10px;
         border-radius: 6px;
-        color: {c['text']};
+        color: transparent;
     }}
     QMenu#modelEffortMenu::item:selected {{
         background: transparent;
@@ -348,7 +348,7 @@ def main_qss() -> str:
     }}
     QMenu#modelEffortSubmenu::item:selected {{
         background: transparent;
-        color: {c['accent_hi']};
+        color: transparent;
     }}
     QMenu#modelEffortMenu::right-arrow {{
         image: none;

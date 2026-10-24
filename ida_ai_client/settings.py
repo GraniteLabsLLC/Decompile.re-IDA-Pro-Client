@@ -14,7 +14,7 @@ from .config import (
 )
 
 _MODEL_TIERS = {"fast", "dynamic", "smart"}
-_AGENT_REASONING_LEVELS = {"low", "medium", "high", "extra_high"}
+_AGENT_REASONING_LEVELS = {"low", "medium", "high", "extra_high", "max"}
 _RENAME_STYLES = {"snake_case", "camelCase", "PascalCase"}
 _STRUCT_MEMBER_STYLES = {"default", "m_prefix", "typed_m_prefix"}
 _SECRET_KEYS = {"refresh_token"}

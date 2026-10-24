@@ -23,6 +23,7 @@ PLUGIN_HELP    = "Analyse the current function with an AI backend."
 PLUGIN_WANTED_NAME = PLUGIN_NAME
 
 _dialog = None    # keep reference so Qt doesn't GC it
+_granite_bridge = None
 _ACTION_DISASSEMBLY = "decompile_re:analyse_disassembly"
 _ACTION_PSEUDOCODE = "decompile_re:analyse_pseudocode"
 _UPDATE_RUN_ID_ENV = "DECOMPILE_RE_UPDATE_RUN_ID"
@@ -166,13 +167,14 @@ def PLUGIN_ENTRY():
 
 
 class AIAnalyzerPlugin(idaapi.plugin_t):
-    flags         = idaapi.PLUGIN_KEEP
+    flags         = idaapi.PLUGIN_FIX
     comment       = PLUGIN_COMMENT
     help          = PLUGIN_HELP
     wanted_name   = PLUGIN_WANTED_NAME
     wanted_hotkey = PLUGIN_HOTKEY
 
     def init(self) -> int:
+        global _granite_bridge
         try:
             from ida_ai_client.config   import QT_AVAILABLE, REQUESTS_AVAILABLE
             from ida_ai_client.compat.runtime import is_supported_ida, IDA_VERSION
@@ -197,6 +199,10 @@ class AIAnalyzerPlugin(idaapi.plugin_t):
             return idaapi.PLUGIN_SKIP
 
         load_settings()
+
+        if os.environ.get("GRANITE_TARGET_ID"):
+            from ida_ai_client.mcp_bridge import start_bridge_if_requested
+            _granite_bridge = start_bridge_if_requested()
 
         # Register and attach right-click menu actions.
         self._actions = []
@@ -229,6 +235,10 @@ class AIAnalyzerPlugin(idaapi.plugin_t):
         self._show_dialog()
 
     def term(self) -> None:
+        global _granite_bridge
+        if _granite_bridge is not None:
+            _granite_bridge.stop()
+            _granite_bridge = None
         if _dialog is not None:
             _dialog.take_reopen_request()
             _dialog.close()

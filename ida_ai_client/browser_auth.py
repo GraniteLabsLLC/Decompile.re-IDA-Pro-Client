@@ -36,6 +36,10 @@ def dashboard_url_for() -> str:
     return ACTIVE_DASHBOARD_URL
 
 
+def account_url_for() -> str:
+    return f"{dashboard_url_for().rstrip('/')}/dashboard/account"
+
+
 def sign_in_with_browser(
     timeout_s: int = 180,
     cancel_event: threading.Event | None = None,

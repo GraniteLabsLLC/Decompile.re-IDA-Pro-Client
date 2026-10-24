@@ -104,8 +104,8 @@ def get_all_structs(plugin_name):
     structs = []
     try:
         til = ida_typeinf.get_idati()
-        count = ida_typeinf.get_ordinal_qty(til)
-        for ordinal in range(1, count + 1):
+        ordinal_limit = ida_typeinf.get_ordinal_limit(til)
+        for ordinal in range(1, ordinal_limit):
             name = ida_typeinf.get_numbered_type_name(til, ordinal)
             if not name:
                 continue

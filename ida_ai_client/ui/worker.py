@@ -13,41 +13,85 @@ Flow:
 
 from __future__ import annotations
 
+import random
 import threading
 import traceback
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
-from ..compat.qt import QThread, Signal
 
-from ..config import ACTIVE_DASHBOARD_URL, g_settings
+from .. import auth_state, browser_auth, fingerprint, secret_store
+from ..compat.qt import QThread, Signal
+from ..config import g_settings
+from ..executor import execute
+from ..ida.sync import run_on_main
 from ..session import (
-    ServerSession,
     AuthError,
     BillingError,
     ServerProtocolError,
+    ServerSession,
     SessionStartError,
     find_shared_auth_context,
     get_shared_auth_context,
 )
-from ..executor import execute
-from ..ida.sync import run_on_main
-from .. import secret_store
-from .. import fingerprint
-from .. import auth_state
-
 
 # Bounded exponential backoff for transient network errors. Long-running
 # analyses keep retrying until the user cancels or the server rejects them.
 _BACKOFF_SCHEDULE_S = (1, 2, 4, 8, 16, 32)
+_BACKOFF_JITTER_FRACTION = 0.20
+_MAX_RETRY_AFTER_S = 5 * 60
 _UNKNOWN_RESULT_RETRY_LIMIT = len(_BACKOFF_SCHEDULE_S)
 _MALFORMED_ACK_RETRY_LIMIT = 3
+
+
+def _retry_after_seconds(
+    error: Exception,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    raw = str(response.headers.get("Retry-After", "") or "").strip()
+    if not raw:
+        return None
+
+    try:
+        delta_seconds = int(raw, 10)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at is None:
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - current).total_seconds()
+    else:
+        seconds = float(min(max(0, delta_seconds), _MAX_RETRY_AFTER_S))
+
+    return min(max(0.0, seconds), float(_MAX_RETRY_AFTER_S))
+
+
+def _retry_wait_seconds(failures: int, error: Exception) -> float:
+    fallback = float(_BACKOFF_SCHEDULE_S[
+        min(max(failures, 1) - 1, len(_BACKOFF_SCHEDULE_S) - 1)
+    ])
+    retry_after = _retry_after_seconds(error)
+    minimum = max(fallback, retry_after or 0.0)
+    return minimum * (1.0 + random.random() * _BACKOFF_JITTER_FRACTION)
 
 
 def _reauth_message(detail: str = "") -> str:
     message = "Authentication failed. Sign in with your browser, then try again."
     if detail:
         message = f"{message}\n\nServer response: {detail}"
-    return f"{message}\n\nDashboard: {ACTIVE_DASHBOARD_URL.rstrip('/')}/app/account"
+    return f"{message}\n\nDashboard: {browser_auth.account_url_for()}"
 
 
 def create_authenticated_server_session(account_id: str | None = None) -> ServerSession:
@@ -672,11 +716,9 @@ class AnalysisWorker(QThread):
         return False
 
     def _wait_for_network(self, failures: int, error: Exception) -> bool:
-        wait_s = _BACKOFF_SCHEDULE_S[
-            min(failures - 1, len(_BACKOFF_SCHEDULE_S) - 1)
-        ]
+        wait_s = _retry_wait_seconds(failures, error)
         self.sig_progress.emit(
-            f"Network error, retrying in {wait_s}s "
+            f"Network error, retrying in {wait_s:.1f}s "
             f"(attempt {failures}): {error}"
         )
         return self._sleep_interruptible(wait_s)

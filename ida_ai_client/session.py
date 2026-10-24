@@ -214,6 +214,7 @@ class ServerSession:
         self._auth_lock = self._auth_context.lock
         self._http_lock = threading.Lock()
         self._last_sequence = 0
+        self.capabilities = set()
 
     @property
     def _refresh_token(self) -> str:
@@ -269,6 +270,46 @@ class ServerSession:
     def _request(self, method: str, url: str, **kwargs):
         with self._http_lock:
             return getattr(self._http, method.lower())(url, **kwargs)
+
+    def _request_session_start(self, url: str, **kwargs):
+        self._ensure_access_jwt()
+        headers = self._auth_headers()
+        resp = self._request("POST", url, headers=headers, **kwargs)
+        if (
+            resp.status_code != 401
+            or self._refresh_rejection_reason(resp) != "session_revoked"
+            or not self._refresh_token
+            or self._auth_context.auth_required is False
+        ):
+            return resp
+
+        try:
+            with self._auth_lock:
+                with secret_store.refresh_token_rotation_lock(
+                    self._account_id,
+                    self.server_url,
+                ):
+                    stored_token = secret_store.load_refresh_token(
+                        self._account_id,
+                        self.server_url,
+                    )
+                    if not stored_token or (
+                        stored_token == self._refresh_token
+                        and headers.get("Authorization")
+                        == self._auth_headers().get("Authorization")
+                    ):
+                        return resp
+                    # Another process rotated the credential behind our cached
+                    # JWT. Keep the rotation lock until the retry is accepted.
+                    self._refresh_token = stored_token
+                    self._access_jwt = ""
+                    self._access_jwt_exp = 0.0
+                    self._exchange_refresh_token_locked()
+                    return self._request(
+                        "POST", url, headers=self._auth_headers(), **kwargs
+                    )
+        except secret_store.CredentialRotationLockTimeout as exc:
+            raise AuthError(str(exc)) from exc
 
     def close(self) -> None:
         """Release HTTP connection pools owned by this session."""
@@ -336,39 +377,37 @@ class ServerSession:
         if self._access_jwt and now < (self._access_jwt_exp - _ACCESS_JWT_REFRESH_LEEWAY_S):
             return
 
-        rotation_request_id = device_identity.refresh_rotation_request_id(
-            self.server_url,
-            self._refresh_token,
-        )
-        body = {
-            "refresh_token":      self._refresh_token,
-            "rotation_request_id": rotation_request_id,
-            "device_fingerprint": self._device_fingerprint,
-            "hostname":           platform.node() or "",
-        }
-        body.update(device_identity.refresh_exchange_proof(
-            self.server_url,
-            self._refresh_token,
-            rotation_request_id,
-        ))
         try:
-            resp = self._request(
-                "POST",
-                f"{self.server_url}/auth/refresh/exchange",
-                json=body,
-                timeout=15,
-                headers={"User-Agent": CLIENT_USER_AGENT},
-                allow_redirects=False,
-            )
-        except requests.exceptions.RequestException as e:
-            raise AuthError(f"Refresh exchange failed: network error: {e}") from e
+            with secret_store.refresh_token_rotation_lock(
+                self._account_id,
+                self.server_url,
+            ):
+                stored_token = secret_store.load_refresh_token(
+                    self._account_id,
+                    self.server_url,
+                )
+                if stored_token:
+                    self._refresh_token = stored_token
+                self._exchange_refresh_token_locked()
+        except secret_store.CredentialRotationLockTimeout as exc:
+            raise AuthError(str(exc)) from exc
+
+    def _exchange_refresh_token_locked(self) -> None:
+        refresh_token = self._refresh_token
+        resp = self._request_refresh_exchange(refresh_token)
+        if resp.status_code in (401, 403):
+            reason = self._refresh_rejection_reason(resp)
+            if reason == "invalid_refresh_token":
+                stored_token = secret_store.load_refresh_token(
+                    self._account_id,
+                    self.server_url,
+                )
+                if stored_token and stored_token != refresh_token:
+                    self._refresh_token = stored_token
+                    resp = self._request_refresh_exchange(stored_token)
 
         if resp.status_code in (401, 403):
-            reason = ""
-            try:
-                reason = resp.json().get("reason", "") or ""
-            except Exception:
-                pass
+            reason = self._refresh_rejection_reason(resp)
             msg = "Refresh token rejected"
             if reason:
                 msg = f"{msg} (reason={reason})"
@@ -391,8 +430,8 @@ class ServerSession:
         if not new_jwt or not new_refresh:
             raise AuthError("Refresh exchange response missing fields")
 
-        # Persist the rotated refresh token before updating in-memory state.
-        # Refresh tokens must only be stored in the OS credential store.
+        # Persist the rotated refresh token before updating in-memory state and
+        # before releasing the cross-process rotation lock.
         try:
             if self._account_id:
                 secret_store.save_refresh_token(new_refresh, self._account_id, self.server_url)
@@ -408,6 +447,44 @@ class ServerSession:
             "email": data.get("email", "") or "",
             "tier": data.get("tier", "") or "",
         }
+
+    def _request_refresh_exchange(self, refresh_token: str):
+        rotation_request_id = device_identity.refresh_rotation_request_id(
+            self.server_url,
+            refresh_token,
+        )
+        body = {
+            "refresh_token":      refresh_token,
+            "rotation_request_id": rotation_request_id,
+            "device_fingerprint": self._device_fingerprint,
+            "hostname":           platform.node() or "",
+        }
+        body.update(device_identity.refresh_exchange_proof(
+            self.server_url,
+            refresh_token,
+            rotation_request_id,
+        ))
+        try:
+            return self._request(
+                "POST",
+                f"{self.server_url}/auth/refresh/exchange",
+                json=body,
+                timeout=15,
+                headers={"User-Agent": CLIENT_USER_AGENT},
+                allow_redirects=False,
+            )
+        except requests.exceptions.RequestException as e:
+            raise AuthError(f"Refresh exchange failed: network error: {e}") from e
+
+    @staticmethod
+    def _refresh_rejection_reason(resp) -> str:
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                return str(data.get("reason", "") or "")
+        except Exception:
+            pass
+        return ""
 
     def _discover_auth_requirement(self) -> bool:
         """Return False only for an explicit capability from a loopback server."""
@@ -470,7 +547,6 @@ class ServerSession:
 
         Raises AuthError on 401/403 and BillingError on 402.
         """
-        self._ensure_access_jwt()
         body = {
             "root_ea":              hex(root_ea),
             "user_prompt":          user_prompt,
@@ -489,12 +565,47 @@ class ServerSession:
         }
         if current_view:
             body["current_view"] = dict(current_view)
-        resp = self._request(
-            "POST",
+        return self._start_request(body)
+
+    def start_reverse_functions(
+        self,
+        targets: list[dict],
+        model_tier: str,
+        auto_renames: bool,
+        auto_types: bool,
+        auto_structs: bool,
+        rename_style: str,
+        struct_member_style: str,
+        max_call_depth: int,
+        guess_virtual_function_calls: bool = False,
+        agent_reasoning_level: str = "high",
+        decompiler: str = "ida",
+    ) -> str:
+        """Start the engine's recursive-reversal operation for an MCP adapter."""
+        body = {
+            "operation": "reverse_functions",
+            "capabilities": ["native_command_activity_v1", "reversal_progress_v1"],
+            "reverse_targets": [dict(target) for target in targets],
+            "model_tier": model_tier,
+            "agent_reasoning_level": agent_reasoning_level,
+            "auto_renames": auto_renames,
+            "auto_types": auto_types,
+            "auto_structs": auto_structs,
+            "rename_style": rename_style,
+            "struct_member_style": struct_member_style,
+            "max_call_depth": max_call_depth,
+            "guess_virtual_function_calls": guess_virtual_function_calls,
+            "decompiler": decompiler,
+            "protocol_version": 1,
+        }
+        return self._start_request(body)
+
+    def _start_request(self, body: dict) -> str:
+        """Submit one validated session-start payload and retain its ID."""
+        resp = self._request_session_start(
             f"{self.server_url}/session",
             json=body,
             timeout=15,
-            headers=self._auth_headers(),
             allow_redirects=False,
         )
 
@@ -546,6 +657,8 @@ class ServerSession:
             ) from exc
         self.session_id = session_id
         self._last_sequence = 0
+        capabilities = payload.get("capabilities") or []
+        self.capabilities = {value for value in capabilities if isinstance(value, str)} if isinstance(capabilities,list) else set()
         return self.session_id
 
     def resume(self) -> bool:
@@ -553,12 +666,9 @@ class ServerSession:
         if not self.session_id:
             return False
         session_id = _require_protocol_id(self.session_id, "session ID")
-        self._ensure_access_jwt()
-        resp = self._request(
-            "POST",
+        resp = self._request_session_start(
             f"{self.server_url}/session/{session_id}/resume",
             timeout=(5, 20),
-            headers=self._auth_headers(),
             allow_redirects=False,
         )
         self._check_authenticated_response(resp, "Session resume")
@@ -789,6 +899,35 @@ class ServerSession:
             except (AttributeError, TypeError, ValueError):
                 err = ""
             raise RuntimeError(f"Chat send failed: HTTP {resp.status_code} {err}")
+
+    def post_command_activity(self, command_id: str, activity: dict) -> None:
+        """Optional admitted native activity, scoped to a pending command."""
+        if "native_command_activity_v1" not in self.capabilities:
+            return
+        session_id = _require_protocol_id(self.session_id, "session ID")
+        command_id = _require_protocol_id(command_id, "command ID")
+        self._ensure_access_jwt()
+        response = self._request("POST", f"{self.server_url}/session/{session_id}/commands/{command_id}/activity",
+                                 json=activity, timeout=(3, 3), headers=self._auth_headers(), allow_redirects=False)
+        if response.status_code not in (200, 404):
+            response.raise_for_status()
+
+    def cancel_operation_with_outcome(self) -> dict:
+        """Distinguish acceptance from the matching backend worker exiting."""
+        if not self.session_id:
+            return {"accepted": False, "stopped": True}
+        session_id = _require_protocol_id(self.session_id, "session ID")
+        self._ensure_access_jwt()
+        response = self._request("DELETE", f"{self.server_url}/session/{session_id}?wait=true",
+                                 timeout=(3, 6), headers=self._auth_headers(), allow_redirects=False)
+        self._check_authenticated_response(response, "Operation cancellation")
+        if response.status_code == 204:
+            return {"accepted": True, "stopped": False, "limited": True}
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ServerProtocolError("Invalid cancellation outcome")
+        return payload
 
     def cancel_operation(self) -> None:
         """Stop the active agent/reversal operation without ending the session."""

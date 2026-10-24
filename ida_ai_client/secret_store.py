@@ -9,11 +9,17 @@ Windows Credential Manager, macOS Keychain, or Linux Secret Service/KWallet.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import errno
 import hashlib
+import os
+import time
+from collections.abc import Iterator
 
 from .config import (
     KEYRING_AVAILABLE,
     PRODUCTION_API_URL,
+    SETTINGS_DIR,
     g_settings,
     validate_server_url,
 )
@@ -28,10 +34,104 @@ _SERVICE = "decompile-ida-client"
 _LEGACY_USER = "refresh_token"
 _USER_PREFIX = "refresh_token:"
 _DEVICE_KEY_PREFIX = "device_key:"
+_ROTATION_LOCK_TIMEOUT_S = 30.0
 
 
 class CredentialStoreUnavailable(RuntimeError):
     """Raised when the OS credential store cannot persist the refresh token."""
+
+
+class CredentialRotationLockTimeout(RuntimeError):
+    """Raised when another process does not finish rotating a token in time."""
+
+
+def _rotation_lock_path(account_id: str | None, server_url: str | None) -> str:
+    scope = f"{_SERVICE}|{_keyring_user(account_id, server_url)}"
+    lock_id = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+    lock_dir = os.path.join(SETTINGS_DIR, "locks")
+    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    return os.path.join(lock_dir, f"refresh-{lock_id}.lock")
+
+
+def _lock_file(fd: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    retry_errors = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+    if os.name == "nt":
+        import msvcrt
+
+        if os.fstat(fd).st_size < 1:
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        while True:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in retry_errors:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise CredentialRotationLockTimeout(
+                        "Timed out waiting for another IDA process to refresh credentials."
+                    ) from exc
+                time.sleep(0.05)
+
+    import fcntl
+
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in retry_errors:
+                raise
+            if time.monotonic() >= deadline:
+                raise CredentialRotationLockTimeout(
+                    "Timed out waiting for another IDA process to refresh credentials."
+                ) from exc
+            time.sleep(0.05)
+
+
+def _unlock_file(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def refresh_token_rotation_lock(
+    account_id: str | None = None,
+    server_url: str | None = None,
+    timeout: float = _ROTATION_LOCK_TIMEOUT_S,
+) -> Iterator[None]:
+    """Serialize one account's refresh-token rotation across IDA processes."""
+    path = _rotation_lock_path(account_id, server_url)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(path, flags, 0o600)
+    acquired = False
+    try:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        _lock_file(fd, timeout)
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                _unlock_file(fd)
+        finally:
+            os.close(fd)
 
 
 def _backend_is_secure(backend) -> bool:
