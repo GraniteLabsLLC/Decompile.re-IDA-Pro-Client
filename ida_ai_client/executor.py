@@ -25,6 +25,7 @@ import ida_ua
 import idautils
 
 from .ida.navigation import get_function_code, get_pseudocode, get_disassembly, get_function_name, find_function_by_name, get_bytes, get_function_global_references, build_call_tree, scan_exports, find_string_xrefs, pdb_symbols_loaded
+from .ida.provenance import get_symbol_provenance
 from .ida.renaming   import (
     safe_rename_function,
     rename_lvar,
@@ -118,6 +119,7 @@ def _get_function_code(cmd: dict) -> dict:
         "type": "string_result",
         "value": code,
         "structs": get_function_structs(ea, code),
+        "symbol_provenance": get_symbol_provenance(ea),
     }
     return result
 
@@ -1249,6 +1251,26 @@ _SYNTAX_CHECK_PREAMBLE = (
 )
 
 
+# A preprocessor directive in server-supplied text could #include any local file
+# and have clang quote its lines back in diagnostics. The preamble already
+# includes the standard headers, so a syntax check never needs a directive of
+# its own: text holding #, the %: digraph or the ??= trigraph is refused, after
+# joining spliced lines (a backslash before a newline), since clang joins them
+# before it reads directives, so "%\<newline>:include" is "%:include".
+# This is stricter than needed (a "#" inside a string literal is refused too).
+_PREPROCESSOR_MARKERS = ("#", "%:", "??=")
+_LINE_SPLICE = re.compile(r"\\[ \t\f\v]*(?:\r\n|\n|\r)")
+_DIRECTIVE_REFUSED = (
+    "error: preprocessor directives are not allowed in a syntax check; "
+    "standard headers are included"
+)
+
+
+def _has_preprocessor_marker(text) -> bool:
+    joined = _LINE_SPLICE.sub("", str(text or ""))
+    return any(marker in joined for marker in _PREPROCESSOR_MARKERS)
+
+
 def _find_clang() -> str | None:
     """Look up a clang++ executable on PATH. Returns None if not present."""
     for name in ("clang++", "clang++-18", "clang++-17", "clang++-16", "clang++-15"):
@@ -1283,9 +1305,12 @@ def _syntax_check(cmd: dict) -> dict:
 
     If clang isn't installed, returns empty output (fail-open). The
     project-level compile pass will surface the issue later if needed.
+    Text holding a preprocessor directive is refused before clang runs.
     """
     shim = cmd.get("shim", "")
     body = cmd.get("body", "")
+    if _has_preprocessor_marker(shim) or _has_preprocessor_marker(body):
+        return {"type": "string_result", "output": _DIRECTIVE_REFUSED}
 
     clang = _find_clang()
     if not clang:

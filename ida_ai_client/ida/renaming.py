@@ -9,6 +9,7 @@ import ida_hexrays
 import ida_typeinf
 
 from ..config import PLUGIN_NAME, HEXRAYS_AVAILABLE
+from .provenance import record_engine_function_name
 
 
 def _sanitise_name(name: str) -> str:
@@ -21,7 +22,11 @@ def _sanitise_name(name: str) -> str:
 def safe_rename_function(ea: int, new_name: str) -> bool:
     try:
         new_name = _sanitise_name(new_name)
-        return idc.set_name(ea, new_name, idc.SN_NOWARN | idc.SN_NOCHECK) != 0
+        previous_name = idc.get_func_name(ea) or ""
+        applied = idc.set_name(ea, new_name, idc.SN_NOWARN | idc.SN_NOCHECK) != 0
+        if applied and new_name != previous_name:
+            record_engine_function_name(ea)
+        return applied
     except Exception as e:
         print(f"[{PLUGIN_NAME}] Rename func {ea:#x}: {e}")
         return False
